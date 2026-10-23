@@ -90,6 +90,168 @@ def test_sound_share():
     assert sound_share(1.5, 1.5, regions) == 1.0 and sound_share(3.0, 3.0, regions) == 0.0
 
 
+def _seg(text: str, start: float, end: float, words=None):
+    from parola.schema import Segment
+
+    return Segment(start=start, end=end, text=text, words=words or [])
+
+
+def _word(text: str, start: float, end: float):
+    from parola.schema import Word
+
+    return Word(text=text, start=start, end=end)
+
+
+def test_uncovered_regions():
+    from parola.asr.mlx_whisper_backend import uncovered_regions
+
+    regions = [(0.0, 5.0), (10.0, 36.0), (40.0, 42.0), (50.0, 60.0)]
+    segments = [
+        _seg(
+            "ciao a tutti",
+            0.5,
+            4.0,
+            [_word("ciao", 0.5, 1.0), _word("a", 1.2, 1.4), _word("tutti", 1.5, 4.0)],
+        ),
+        # Word times lost: the segment span still covers its region.
+        _seg("va bene", 51.0, 55.0),
+    ]
+    # (10, 36) has no word on it; (40, 42) is shorter than GAP_MIN_SECONDS.
+    assert uncovered_regions(segments, regions) == [(10.0, 36.0)]
+    # A word midpoint within the tolerance of the region's edge covers it.
+    near = [*segments, _seg("si", 9.5, 9.9, [_word("si", 9.5, 9.9)])]
+    assert uncovered_regions(near, regions) == []
+    assert uncovered_regions([], regions) == [(0.0, 5.0), (10.0, 36.0), (50.0, 60.0)]
+
+
+def test_shifted():
+    from parola.asr.mlx_whisper_backend import shifted
+
+    [seg] = shifted([_seg("ciao", 1.0, 2.0, [_word("ciao", 1.0, 2.0)])], 178.5)
+    assert (seg.start, seg.end) == (179.5, 180.5)
+    assert (seg.words[0].start, seg.words[0].end) == (179.5, 180.5)
+    assert seg.text == "ciao"
+
+
+def test_write_clip(tmp_path):
+    import wave
+
+    import numpy as np
+
+    from parola.asr.mlx_whisper_backend import write_clip
+
+    rate = 16_000
+    samples = np.arange(rate, dtype=np.int16)  # 1 s, recognisable values
+    src = tmp_path / "src.wav"
+    with wave.open(str(src), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate)
+        f.writeframes(samples.tobytes())
+
+    clip = tmp_path / "clip.wav"
+    write_clip(src, 0.25, 0.5, clip)
+    with wave.open(str(clip), "rb") as f:
+        assert f.getframerate() == rate
+        got = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
+    assert np.array_equal(got, samples[rate // 4 : rate // 2])
+
+    # Bounds outside the file are clamped, not an error.
+    write_clip(src, 0.9, 2.0, clip)
+    with wave.open(str(clip), "rb") as f:
+        assert f.getnframes() == rate - int(0.9 * rate)
+
+
+def test_repair_gaps(tmp_path, monkeypatch):
+    """The skipped region is decoded on its own clip and grafted back at the right offset."""
+    import sys
+    import wave
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from parola.asr.mlx_whisper_backend import GAP_MARGIN_SECONDS, MLXWhisperBackend
+
+    rate = 16_000
+    wav = tmp_path / "audio.wav"
+    with wave.open(str(wav), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate)
+        f.writeframes(np.zeros(rate * 30, dtype=np.int16).tobytes())
+
+    calls: list[str] = []
+
+    def fake_transcribe(path, **kwargs):
+        calls.append(path)
+        with wave.open(path, "rb") as f:
+            assert f.getframerate() == rate
+        # Clip-local times; "fuori" lies in the margin, outside the gap region.
+        return {
+            "language": "it",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": " fuori",
+                 "words": [{"word": " fuori", "start": 0.0, "end": 1.0, "probability": 0.9}]},
+                {"start": 2.0, "end": 4.0, "text": " dentro la regione",
+                 "words": [{"word": " dentro", "start": 2.0, "end": 2.5, "probability": 0.9},
+                           {"word": " la", "start": 2.6, "end": 2.8, "probability": 0.9},
+                           {"word": " regione", "start": 2.9, "end": 4.0, "probability": 0.9}]},
+            ],
+        }  # fmt: skip
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=fake_transcribe))
+
+    backend = MLXWhisperBackend(vad=True)
+    before = [
+        _seg("prima", 1.0, 2.0, [_word("prima", 1.0, 2.0)]),
+        _seg("dopo", 25.0, 26.0, [_word("dopo", 25.0, 26.0)]),
+    ]
+    regions = [(0.5, 2.5), (10.0, 20.0), (24.5, 26.5)]
+    repaired = backend._repair_gaps(wav, before, regions, "it")
+
+    assert len(calls) == 1  # only the (10, 20) gap is decoded again
+    assert [s.text for s in repaired] == ["prima", "dentro la regione", "dopo"]
+    grafted = repaired[1]
+    offset = 10.0 - GAP_MARGIN_SECONDS
+    assert grafted.start == offset + 2.0 and grafted.end == offset + 4.0
+    assert grafted.words[0].start == offset + 2.0
+
+    # Nothing uncovered: no decoding at all.
+    calls.clear()
+    assert backend._repair_gaps(wav, before, [(0.5, 2.5)], "it") == before
+    assert calls == []
+
+
+def test_repair_gaps_cap(tmp_path, monkeypatch):
+    import sys
+    import wave
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from parola.asr.mlx_whisper_backend import MAX_GAP_REPAIRS, MLXWhisperBackend
+
+    rate = 16_000
+    wav = tmp_path / "audio.wav"
+    with wave.open(str(wav), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate)
+        f.writeframes(np.zeros(rate * 120, dtype=np.int16).tobytes())
+
+    calls: list[str] = []
+
+    def fake_transcribe(path, **kwargs):
+        calls.append(path)
+        return {"language": "it", "segments": []}
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", SimpleNamespace(transcribe=fake_transcribe))
+
+    regions = [(i * 10.0, i * 10.0 + 5.0) for i in range(MAX_GAP_REPAIRS + 4)]
+    MLXWhisperBackend(vad=True)._repair_gaps(wav, [], regions, "it")
+    assert len(calls) == MAX_GAP_REPAIRS
+
+
 def test_has_sound_keeps_long_segments_with_some_speech():
     from parola.asr.mlx_whisper_backend import has_sound
     from parola.schema import Segment, Word

@@ -33,6 +33,7 @@ class System:
     prompt: bool = False
     kind: Literal["mlx-whisper", "parakeet", "crisper"] = "mlx-whisper"
     vad: bool = False
+    gap_repair: bool = True
     glossary: bool = False
     glossary_carried: bool = True
 
@@ -55,7 +56,7 @@ class System:
         if glossary and not self.glossary_carried:
             prompt, glossary = glossary, None
         return MLXWhisperBackend(self.model, initial_prompt=prompt, seed=seed, vad=self.vad,
-                                 glossary=glossary)  # fmt: skip
+                                 glossary=glossary, gap_repair=self.gap_repair)  # fmt: skip
 
     def language(self, lang: str) -> str | None:
         """Language passed to the backend for a file whose manifest language is ``lang``."""
@@ -67,8 +68,10 @@ SYSTEMS = {
     for s in [
         System("turbo", "large-v3-turbo, language detected"),
         System("turbo-lang", "large-v3-turbo, language forced", force_language=True),
-        System("turbo-vad", "large-v3-turbo, language detected, only stretches with sound (VAD)",
-               vad=True),
+        System("turbo-vad", "large-v3-turbo, language detected, only stretches with sound (VAD), "
+               "skipped sound regions decoded again on their own clip (gap repair)", vad=True),
+        System("turbo-vad-norepair", "large-v3-turbo, language detected, VAD without gap repair "
+               "(comparison)", vad=True, gap_repair=False),
         System("turbo-glossary", "large-v3-turbo, personal glossary carried on every window",
                glossary=True),
         System("turbo-glossary-initial", "large-v3-turbo, personal glossary as initial prompt only",

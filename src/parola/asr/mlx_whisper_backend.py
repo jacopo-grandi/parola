@@ -16,6 +16,16 @@ SEED = 0
 # measured and rejected: long segments with little speech were dropped with real words in them
 # (results/2026-10-15-vad.md). Tolerance around the regions, for imprecise word timestamps:
 WORD_TOLERANCE_SECONDS = 0.3
+# Gap repair (vad=True only): Whisper's long-form decode sometimes jumps a whole window of
+# clean speech (seen on a real call, results/2026-10-23-gap-repair.md). After the full decode,
+# sound regions at least this long with no transcribed word on them are decoded again, each on
+# its own clip; the full decode is untouched, so the other windows cannot move (moving them is
+# what sank the per-region decode, results/2026-10-15-vad.md).
+GAP_MIN_SECONDS = 3.0
+# The clip starts and ends this much outside the region, so edge words are heard whole.
+GAP_MARGIN_SECONDS = 1.5
+# Ceiling on clips per file: a pathological file must not multiply the decoding time.
+MAX_GAP_REPAIRS = 8
 
 
 def convert_result(result: dict[str, Any]) -> ASRResult:
@@ -113,6 +123,69 @@ def sound_share(start: float, end: float, regions: list[tuple[float, float]]) ->
     return covered / (end - start)
 
 
+def uncovered_regions(
+    segments: list[Segment],
+    regions: list[tuple[float, float]],
+    min_seconds: float = GAP_MIN_SECONDS,
+) -> list[tuple[float, float]]:
+    """Sound regions at least ``min_seconds`` long on which no transcribed word falls.
+
+    The mirror of ``has_sound``: word midpoints with the same tolerance; a segment without
+    word times covers the regions its span overlaps.
+    """
+    t = WORD_TOLERANCE_SECONDS
+    mids: list[float] = []
+    spans: list[tuple[float, float]] = []
+    for seg in segments:
+        seg_mids = [(w.start + w.end) / 2 for w in seg.words
+                    if w.start is not None and w.end is not None]  # fmt: skip
+        if seg_mids:
+            mids.extend(seg_mids)
+        else:
+            spans.append((seg.start, seg.end))
+    out: list[tuple[float, float]] = []
+    for a, b in regions:
+        if b - a < min_seconds:
+            continue
+        if any(a - t <= m <= b + t for m in mids):
+            continue
+        if any(s <= b + t and e >= a - t for s, e in spans):
+            continue
+        out.append((a, b))
+    return out
+
+
+def shifted(segments: list[Segment], offset: float) -> list[Segment]:
+    """Segments decoded on a clip, moved onto the original timeline."""
+
+    def move(t: float | None) -> float | None:
+        return None if t is None else t + offset
+
+    out = []
+    for seg in segments:
+        words = [w.model_copy(update={"start": move(w.start), "end": move(w.end)})
+                 for w in seg.words]  # fmt: skip
+        out.append(seg.model_copy(update={"start": seg.start + offset,
+                                          "end": seg.end + offset, "words": words}))  # fmt: skip
+    return out
+
+
+def write_clip(wav_path: Path, start: float, end: float, out_path: Path) -> None:
+    """Write the ``[start, end]`` stretch of a wav file as a wav of its own."""
+    import wave
+
+    with wave.open(str(wav_path), "rb") as f:
+        rate = f.getframerate()
+        a = min(max(0, int(start * rate)), f.getnframes())
+        b = min(max(a, int(end * rate)), f.getnframes())
+        f.setpos(a)
+        frames = f.readframes(b - a)
+        params = f.getparams()
+    with wave.open(str(out_path), "wb") as f:
+        f.setparams(params)
+        f.writeframes(frames)
+
+
 @contextmanager
 def whisper_progress(callback, segments=None) -> Iterator[None]:
     """Report how much of the audio Whisper has decoded: mlx_whisper only shows it as a tqdm
@@ -208,12 +281,16 @@ class MLXWhisperBackend:
         seed: int = SEED,
         vad: bool = False,
         glossary: str | None = None,
+        gap_repair: bool = True,
     ) -> None:
         self.model = model
         self.initial_prompt = initial_prompt
         self.seed = seed
         # Transcribe only the stretches with sound (parola.audio.vad).
         self.vad = vad
+        # With VAD: decode again, each on its own clip, the sound regions the full decode
+        # left without words (results/2026-10-23-gap-repair.md).
+        self.gap_repair = gap_repair
         # Terms carried in the prompt of every window (parola.glossary).
         self.glossary = glossary
         self.on_progress = None
@@ -296,4 +373,42 @@ class MLXWhisperBackend:
         if cuts is not None:
             converted.segments = restore_times(converted.segments, cuts)
         converted.segments = [s for s in converted.segments if has_sound(s, regions)]
+        if self.gap_repair:
+            converted.segments = self._repair_gaps(wav_path, converted.segments, regions,
+                                                   language)  # fmt: skip
         return converted
+
+    def _repair_gaps(
+        self,
+        wav_path: Path,
+        segments: list[Segment],
+        regions: list[tuple[float, float]],
+        language: str | None,
+    ) -> list[Segment]:
+        """Transcribe on its own clip every sound region the full decode left without words."""
+        gaps = uncovered_regions(segments, regions)
+        if not gaps:
+            return segments
+        import tempfile
+
+        import mlx_whisper
+
+        repaired = list(segments)
+        with tempfile.TemporaryDirectory(prefix="parola-gaps-") as tmp:
+            for i, (a, b) in enumerate(gaps[:MAX_GAP_REPAIRS]):
+                start = max(0.0, a - GAP_MARGIN_SECONDS)
+                clip = Path(tmp) / f"gap-{i}.wav"
+                write_clip(wav_path, start, b + GAP_MARGIN_SECONDS, clip)
+                result = mlx_whisper.transcribe(
+                    str(clip),
+                    path_or_hf_repo=self.model,
+                    language=language,
+                    word_timestamps=True,
+                    initial_prompt=self.initial_prompt,
+                )
+                clip_segments = shifted(convert_result(result).segments, start)
+                # Filtered against the gap region alone: the margins must not re-add words
+                # the full decode already has, and the clip can hallucinate on its edges.
+                repaired += [s for s in clip_segments if has_sound(s, [(a, b)])]
+        repaired.sort(key=lambda s: (s.start, s.end))
+        return repaired
