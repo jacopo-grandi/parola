@@ -106,6 +106,7 @@ DISCOURSE = frozenset(
 allora quindi cioè insomma diciamo praticamente tipo comunque appunto ecco boh beh vabbe
 vabbè magari forse ok okay va' be' mah uhm hmm basically literally anyway alright yeah oh
 attimo
+ciao salve buongiorno buonasera buonanotte arrivederci hello goodbye bye
 """
     )
 )
@@ -251,6 +252,10 @@ def _runs(
                        and (len(word) >= 3 or acronym))  # fmt: skip
             ends = bool(_BREAK_AFTER.search(raw))
             if content:
+                if run and not pending and run[-1][0] == word:
+                    # A decode loop ("Ciao Ciao Ciao ..."): the repeats are one saying of the
+                    # word - no term frequency, and no mid-sentence capital passing for a name.
+                    continue
                 if not run:
                     det = after_det
                 run += [*pending, (word, surface)]

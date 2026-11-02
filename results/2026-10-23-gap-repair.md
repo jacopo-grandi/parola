@@ -72,3 +72,11 @@ Adopted, on by default in the `vad=True` path (`gap_repair=True`): the WER does 
 - **Silver references**: words checked by a person, fillers mostly proposed by Whisper large-v3-turbo. The filler metrics are optimistic for the turbo variants, especially with the prompt.
 - **Anchoring**: the references start from the large-v3-turbo draft, so the turbo systems have an advantage over the other models.
 - With few references the intervals are wide: differences within the intervals are not significant.
+
+## Update 2026-11-02: pieces of a region, not whole regions
+
+A real call lost 23 s at the head of a 40-second sound region whose tail had words: the region
+counted as covered, so nothing was repaired. `uncovered_regions` now cuts each region at the
+transcribed words and brings back every word-less piece of at least 3 s. On the test set the
+repair still fires on the same two windows and nowhere else; on the real call the head comes
+back ("Allora io non ho tanto da dire…", 4.6-29.3 s).

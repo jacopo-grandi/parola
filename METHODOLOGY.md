@@ -273,7 +273,7 @@ The text is cut into runs at every word that cannot belong to a topic:
 | Cut at | Detail |
 |---|---|
 | Closed classes, Italian and English | Articles, prepositions (articulated ones too), pronouns, conjunctions, the forms of *essere, avere, stare, potere, dovere, volere* and of *be, have, do* and the modals, listed in full |
-| Fillers and discourse markers | The fillers of [`docs/conventions.md`](docs/conventions.md); markers such as *allora, quindi, cioè, insomma, praticamente, basically, anyway* |
+| Fillers and discourse markers | The fillers of [`docs/conventions.md`](docs/conventions.md); markers such as *allora, quindi, cioè, insomma, praticamente, basically, anyway*; greetings (*ciao, salve, hello, goodbye*): they carry the flow of a call, never its subject |
 | Number words | *uno, due, … mille, primo*; *one, two, … first* |
 | Adverbs | Words ending in *-mente* (over 7 letters) or *-ly* (over 5 letters, so "Italy" stays) |
 | Very frequent words | Zipf ≥ 6 in Italian **or** English (more than one in a thousand words: *cosa, think, because*), the frequency-based stop list RAKE itself suggests; either language, because calls mix them |
@@ -282,6 +282,10 @@ The text is cut into runs at every word that cannot belong to a topic:
 
 A doubtful word is kept only if it was transcribed the same way at least 3 times: once it may be
 a mistake, ten identical "baking soda" are the subject of the call.
+
+Consecutive repeats of one word count as one saying: a decode loop ("Ciao Ciao Ciao…", seen on a
+real call's goodbyes) must not inflate a word's frequency, nor lend it the mid-sentence capital
+that would make it pass for a name.
 
 A run keeps 1 to 3 content words. "di"/"of" (and the articulated forms of "di") may join two
 content words inside it ("raccolta delle olive", "number of seeds"); elided forms are split

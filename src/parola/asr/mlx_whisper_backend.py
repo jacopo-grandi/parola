@@ -128,30 +128,40 @@ def uncovered_regions(
     regions: list[tuple[float, float]],
     min_seconds: float = GAP_MIN_SECONDS,
 ) -> list[tuple[float, float]]:
-    """Sound regions at least ``min_seconds`` long on which no transcribed word falls.
+    """Stretches of sound at least ``min_seconds`` long on which no transcribed word falls.
 
-    The mirror of ``has_sound``: word midpoints with the same tolerance; a segment without
-    word times covers the regions its span overlaps.
-    """
+    The mirror of ``has_sound``: word midpoints with the same tolerance, and a segment
+    without word times counts as its whole span. The words cut each region into pieces and
+    the long word-less pieces come back: a region is never covered as a whole, because a
+    40-second one with words only on its tail still hid 23 skipped seconds at its head
+    (seen on a real call, 2026-11-02)."""
     t = WORD_TOLERANCE_SECONDS
-    mids: list[float] = []
-    spans: list[tuple[float, float]] = []
+    covered: list[tuple[float, float]] = []
     for seg in segments:
         seg_mids = [(w.start + w.end) / 2 for w in seg.words
                     if w.start is not None and w.end is not None]  # fmt: skip
         if seg_mids:
-            mids.extend(seg_mids)
+            covered += [(m - t, m + t) for m in seg_mids]
         else:
-            spans.append((seg.start, seg.end))
+            covered.append((seg.start - t, seg.end + t))
+    covered.sort()
     out: list[tuple[float, float]] = []
     for a, b in regions:
         if b - a < min_seconds:
             continue
-        if any(a - t <= m <= b + t for m in mids):
-            continue
-        if any(s <= b + t and e >= a - t for s, e in spans):
-            continue
-        out.append((a, b))
+        lo = a
+        for s, e in covered:
+            if e <= lo:
+                continue
+            if s >= b:
+                break
+            if s - lo >= min_seconds:
+                out.append((lo, s))
+            lo = max(lo, e)
+            if lo >= b:
+                break
+        if b - lo >= min_seconds:
+            out.append((lo, b))
     return out
 
 

@@ -265,3 +265,17 @@ def test_without_spacy_models_phrases_still_work(monkeypatch):
     monkeypatch.setattr(K, "_nlp", lambda lang: None)
     t = call("allora il vaso rialzato è pronto", "quindi il vaso rialzato di ottobre")
     assert texts(t)[0] == "vaso rialzato"
+
+
+def test_a_hallucinated_loop_never_names_a_call():
+    """The real call of 2026-11-02: Whisper looped "Ciao" eleven times on the goodbyes, and
+    the mid-sentence capitals passed for a name. Consecutive repeats count as one saying."""
+    t = call("Grappolo Grappolo Grappolo Grappolo Grappolo Grappolo Grappolo",
+             "il vaso rialzato è pronto", "il vaso rialzato di ottobre")  # fmt: skip
+    assert all("grappolo" not in p.lower() for p in texts(t))
+
+
+def test_greetings_never_name_a_call():
+    t = call("ciao a tutti e benvenuti", "ciao ciao ci sentiamo dopo il meeting",
+             "Ciao Ciao Ciao Ciao Ciao")  # fmt: skip
+    assert all("ciao" not in p.lower() for p in texts(t))

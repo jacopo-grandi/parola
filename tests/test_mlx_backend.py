@@ -103,6 +103,8 @@ def _word(text: str, start: float, end: float):
 
 
 def test_uncovered_regions():
+    from pytest import approx
+
     from parola.asr.mlx_whisper_backend import uncovered_regions
 
     regions = [(0.0, 5.0), (10.0, 36.0), (40.0, 42.0), (50.0, 60.0)]
@@ -113,15 +115,29 @@ def test_uncovered_regions():
             4.0,
             [_word("ciao", 0.5, 1.0), _word("a", 1.2, 1.4), _word("tutti", 1.5, 4.0)],
         ),
-        # Word times lost: the segment span still covers its region.
+        # Word times lost: the segment span covers its stretch, and what follows it in the
+        # region ((55.3, 60), 4.7 s) is still a gap.
         _seg("va bene", 51.0, 55.0),
     ]
     # (10, 36) has no word on it; (40, 42) is shorter than GAP_MIN_SECONDS.
-    assert uncovered_regions(segments, regions) == [(10.0, 36.0)]
-    # A word midpoint within the tolerance of the region's edge covers it.
+    assert uncovered_regions(segments, regions) == approx([(10.0, 36.0), (55.3, 60.0)])
+    # A word at the region's edge covers its tolerance, not the whole region.
     near = [*segments, _seg("si", 9.5, 9.9, [_word("si", 9.5, 9.9)])]
-    assert uncovered_regions(near, regions) == []
+    assert uncovered_regions(near, regions) == approx([(10.0, 36.0), (55.3, 60.0)])
     assert uncovered_regions([], regions) == [(0.0, 5.0), (10.0, 36.0), (50.0, 60.0)]
+
+
+def test_a_region_covered_only_on_its_tail_still_repairs_its_head():
+    """The real call of 2026-11-02: one sound region of 40 s, words only from second 28 - the
+    23 skipped seconds at its head must come back as a gap."""
+    from pytest import approx
+
+    from parola.asr.mlx_whisper_backend import uncovered_regions
+
+    words = [_word(f"w{k}", 28.0 + k, 28.6 + k) for k in range(17)]
+    segments = [_seg("parole in coda", 28.0, 45.2, words)]
+    (gap,) = uncovered_regions(segments, [(4.5, 45.2)])
+    assert gap == approx((4.5, 28.0))
 
 
 def test_shifted():
