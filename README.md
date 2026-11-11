@@ -31,9 +31,14 @@ Status: in development; the native Mac app works.
 - **ToTTI: English calls in Italian (experimental).** ToTTI (Tool To Translate Italian) puts
   the Italian translation under each English line with the **IT** toggle of a call, and writes
   live Italian subtitles under the floating recorder with **CC**, while recording or without
-  recording anything. It runs locally on Opus-MT and never changes the verbatim transcript. The
-  model is converted once by hand ([how](#reading-the-transcripts)); how it was chosen and
-  measured is in [`METHODOLOGY.md`](METHODOLOGY.md#translation-into-italian-totti).
+  recording anything. Its engine is its own model: a small student (78M parameters, started
+  from Opus-MT en-it) distilled from MADLAD-400-3B-MT, which translated public meeting
+  transcripts (AMI, ICSI) for it, with human translations from Tatoeba and Europarl as an
+  anchor, then blended with the starting weights so its general Italian holds. It runs on the
+  CPU, at the speed of the model it started from, and never changes the verbatim transcript.
+  The ToTTI weights are not published; without them the same buttons work on plain Opus-MT,
+  converted once by hand ([how](#reading-the-transcripts)). How it was trained and measured:
+  [`METHODOLOGY.md`](METHODOLOGY.md#translation-into-italian-totti).
 
 ## What it looks like
 
@@ -191,11 +196,14 @@ kept as `<name>.asr.json`. Export as txt, md, docx, json, or PDF through the bro
 toggle in a call shows the Italian translation under each English line, and the **CC** button
 on the floating recorder writes live Italian subtitles under it, during a recording or without
 recording anything. The translation is derived from the verbatim and never changes it. The app
-does not download this model: convert Helsinki-NLP/opus-mt-en-it (Apache-2.0 on its model
-card, CC-BY 4.0 in the OPUS-MT repository) to CTranslate2 int8 into
-`data/models/opus-mt-en-it-ct2` with `training/totti/convert.sh`, in a separate environment
-with `ctranslate2` and `transformers`. Until it is there, the toggles stay hidden. How the
-engine was chosen and measured is in [METHODOLOGY.md](METHODOLOGY.md#translation-into-italian-totti).
+does not download a translation model. It uses the ToTTI model, distilled from MADLAD-400-3B-MT
+into Opus-MT, when it is in `data/models/opus-mt-en-it-totti-v1-ct2`: those weights are trained
+with the package in `training/totti/` and are not published. Otherwise it uses plain
+Opus-MT: convert Helsinki-NLP/opus-mt-en-it (Apache-2.0 on its model card, CC-BY 4.0 in the
+OPUS-MT repository) to CTranslate2 int8 into `data/models/opus-mt-en-it-ct2` with
+`training/totti/convert.sh`, in a separate environment with `ctranslate2` and `transformers`.
+With neither on disk, the toggles stay hidden. How the engine was chosen, trained and measured
+is in [METHODOLOGY.md](METHODOLOGY.md#translation-into-italian-totti).
 
 ### Writing reference transcripts
 
