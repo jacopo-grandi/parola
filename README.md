@@ -16,6 +16,25 @@ Status: in development; the native Mac app works.
 
 ![The demo call in P.A.R.O.L.A.: the transcript with the voice named, the calls in the sidebar, and the player with every doubt reviewed](docs/assets/screenshots/call.png)
 
+## What's new
+
+**November 2026**
+
+- **It asks when a call starts.** When another app starts using the microphone (Meet in the
+  browser, Zoom, FaceTime…), the floating recorder shows up as a question: "Call su Zoom ·
+  Registrare con P.A.R.O.L.A.?". **Registra** turns it into the recorder where it is; otherwise
+  it goes away after 20 seconds, and the menu bar keeps **Registra la call su Zoom** until the
+  call ends. When that app lets the microphone go, the recorder asks "La call è finita?" and,
+  without an answer, stops and transcribes after a minute. Muting does not count, and it never
+  starts recording without a click. Switch it off from the menu bar with **Proponi di
+  registrare le call**, or stop it for one app from the **…** menu.
+- **ToTTI: English calls in Italian (experimental).** ToTTI (Tool To Translate Italian) puts
+  the Italian translation under each English line with the **IT** toggle of a call, and writes
+  live Italian subtitles under the floating recorder with **CC**, while recording or without
+  recording anything. It runs locally on Opus-MT and never changes the verbatim transcript. The
+  model is converted once by hand ([how](#reading-the-transcripts)); how it was chosen and
+  measured is in [`METHODOLOGY.md`](METHODOLOGY.md#translation-into-italian-totti).
+
 ## What it looks like
 
 ![Forty seconds in P.A.R.O.L.A.: a call is recorded with the floating recorder, transcribed, a doubtful word is corrected with a learned suggestion, exported, found with search and renamed](docs/assets/demo.gif)
