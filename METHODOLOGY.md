@@ -13,8 +13,8 @@ marks the words it does not confirm (66% of turbo's errors flagged by marking 12
 and the person reviews only those. Every correction is logged next to what the model had
 written, and these logs become a personal glossary that suggests the next corrections. Titles
 come from TF-IDF key phrases scored against the language, without a language model. English
-calls can be read in Italian: an 87 MB local model translates each line, improved by distilling
-a larger teacher on meeting speech (chrF 56.1 to 57.0 on hand-translated references). Calls are recorded on two channels, so "me" and "the others"
+calls can be read in Italian: an 87 MB local model translates each line, a student distilled from
+a larger teacher on meeting speech (chrF 52.2 to 54.3 on 406 hand-translated pairs). Calls are recorded on two channels, so "me" and "the others"
 are never guessed; within a channel, voices are told apart by sherpa-onnx with our own spectral
 clustering (diarization error 30% on two AMI meetings). An hour of audio takes about 8 minutes on
 an M4 Pro, with a memory peak of about 6 GB. The test set is small (0.76 hours of adjudicated
@@ -386,9 +386,11 @@ text — the one thing subtitles must not do — and NLLB's licence is non-comme
 
 ### Measured like the transcript
 
-- The test set is **224 EN→IT pairs from two of the author's English recordings** (a lecture and
-  a conversation, with the speakers' consent): the sources are verbatim ASR segments, the
-  references translated by hand. Like the audio, the pairs are never committed.
+- The test set started as **224 EN→IT pairs from two of the author's English recordings** (a
+  lecture and a conversation, with the speakers' consent) and grew to **406** with two public
+  meetings from YouTube (a GitLab team meeting, and a council meeting in formal procedural
+  English): the sources are verbatim ASR segments, the references translated by hand. Like the
+  audio, the pairs are never committed.
 - A design choice worth stating plainly: the source sentences are the transcripts P.A.R.O.L.A.
   actually produces, residual ASR errors included, and the gold translates the transcript, not
   the idealized speech (stretches with unresolved doubts are excluded from pairing). The meter
@@ -404,7 +406,7 @@ text — the one thing subtitles must not do — and NLLB's licence is non-comme
   the general-domain regression guard: a model that gets better on calls by getting worse at
   ordinary English is refused.
 
-The base engine scores chrF 56.1 on the domain set and 57.6 on FLORES, with no copies and no
+The base engine scores chrF 56.1 on the domain set (224 pairs at the time) and 57.6 on FLORES, with no copies and no
 inflated output ([report](results/2026-10-19-totti-baseline-en-it.md)).
 
 ### A teacher chosen by the numbers
@@ -469,26 +471,51 @@ gentler second run trained longer and drifted further. The fully trained student
 worse than the base on the hand-made set (55.1 against 56.1): past a point, the gain on the dev
 set is imitation of the teacher's phrasing, not quality.
 
-What shipped is a **weight interpolation** between the base and the trained student,
+What shipped first (v0) is a **weight interpolation** between the base and the trained student,
 θ(α) = α·student + (1−α)·base, each point converted to int8 and scored with the same harness:
 
 | model | FLORES | domain |
 |---|---|---|
 | base | 57.6 | 56.1 |
-| **α = 0.3** (shipped) | **57.2** | **57.0** |
+| **α = 0.3** (v0) | **57.2** | **57.0** |
 | α = 0.5 | 56.0 | 56.6 |
 | α = 0.7 | 54.3 | 55.9 |
 | α = 1.0 (the full student) | 51.3 | 55.1 |
 
 α = 0.3 passes the gate: both calls improve (lecture 60.3 → 61.1, conversation 51.6 → 52.6) and
 FLORES stays above the floor. The gain is small but consistent: a paired bootstrap over
-segments has it ahead of the base in **1000 of 1000 resamples**. The app prefers the
-interpolated weights when they are on disk and falls back to the base
-([report](results/2026-10-20-totti-t4-student.md)).
+segments has it ahead of the base in **1000 of 1000 resamples**
+([report](results/2026-10-20-totti-t4-student.md)). v0 was replaced by v1, below.
 
-Honestly sized: +0.9 chrF is about a third of the teacher's +2.7 on this set, and the test set
-is two calls. More hand-translated calls sharpen both the test set and the next run of this
-table; Italian to English is the same loop in the other direction, not started.
+### ToTTI v1: a human anchor, the model the app uses
+
+On the widened 406-pair set v0 still beat the base (+1.6 chrF, +6.3 on the GitLab meeting) but
+lost its edge on the council meeting (−0.3, within noise): formal register that the distilled
+data never covered. v1 keeps the same 78M architecture — the live engine's speed is the
+requirement — and changes the data: training restarts from the base on **97,522 pairs**, the
+72,522 distilled ones plus **15,000 Tatoeba and 10,000 Europarl** human translations as an
+anchor (26% human). The anchor did what it was added for: at α = 1 the FLORES drift fell from
+−6.3 to −0.4. Interpolated with the base and scored with the same harness:
+
+| model | all (406) | lecture | conversation | GitLab | council | FLORES |
+|---|---|---|---|---|---|---|
+| base | 52.2 | 60.3 | 51.6 | 40.4 | 52.0 | 57.6 |
+| v0 (α = 0.3) | 53.8 | 61.1 | 52.6 | 46.7 | 51.7 | 57.2 |
+| **v1, α = 0.5** (shipped) | **54.3** | 61.1 | 53.2 | 47.7 | **52.3** | **57.5** |
+| v1, α = 1.0 (the full student) | 53.6 | 60.1 | 52.9 | 48.1 | 50.3 | 56.1 |
+
+v1 at α = 0.5 is the model the app uses: **+2.1 chrF over the base** (CI [+1.1, +3.1], ahead
+in all 1,000 paired-bootstrap resamples; +7.3 on the GitLab meeting) and +0.5 over v0 (ahead
+in 98%), with the council slice recovered and FLORES within 0.1 of the base. It did **not**
+pass the gate fixed before training — 54.7, what Opus-MT tc-big (a larger 0.2B model of the
+same family) scores with no training at all — and the failure stays on record: v1 ships as a
+strict improvement on v0 at the same speed, not through the gate. The app loads v1, then v0,
+then the base, whichever is on disk ([report](results/2026-10-21-totti-v1-alpha-sweep.md)).
+
+Honestly sized: +2.1 chrF is a bit over half of the teacher's +3.6 on the same 406 pairs, every
+reference comes from one translator, and two of the four recordings are the author's own. More
+hand-translated calls sharpen both the test set and the next run of this table; Italian to
+English is the same loop in the other direction, not started.
 
 ## Limitations
 
@@ -505,8 +532,9 @@ table; Italian to English is the same loop in the other direction, not started.
   On en-001, a lecture, the voices alternate as if there were two speakers; not checked yet.
 - **Language on four files.** The 5-window detection is checked on four recordings, none of them
   mixed Italian and English.
-- **Translation measured on two calls.** The 224 reference pairs come from one lecture and one
-  conversation, translated by one person, and the shipped gain over the base engine is +0.9 chrF.
+- **Translation measured on four recordings.** The 406 reference pairs come from a lecture, a
+  conversation and two public meetings, all translated by one person, and the shipped gain over
+  the base engine is +2.1 chrF.
   The references fix recognition errors that every system translates alike, so part of the
   measured gap is source noise. Italian to English does not exist yet.
 - **Device changes untried on real hardware.** The conversion and the silence filling are
@@ -527,10 +555,11 @@ table; Italian to English is the same loop in the other direction, not started.
 | pyannote segmentation 3.0 (sherpa-onnx export) | who speaks | MIT | 6 MB |
 | WeSpeaker VoxCeleb ResNet34-LM | who speaks | CC BY 4.0 | 27 MB |
 | wordfreq | titles, glossary | Apache-2.0 (data CC BY-SA 4.0) | in the package |
-| Opus-MT en-it (CTranslate2 conversion, α=0.3 interpolation) | translation | Apache-2.0 (model card; CC BY 4.0 on the OPUS-MT repository) | 87 MB |
+| Opus-MT en-it (CTranslate2 conversion) | translation: the base, and the starting point of the ToTTI student (v1, α = 0.5 interpolation; weights not published) | Apache-2.0 (model card; CC BY 4.0 on the OPUS-MT repository) | 87 MB |
 | MADLAD-400-3B-MT (training only) | distillation teacher | Apache-2.0 | not bundled |
 | Qwen3-4B-Instruct (evaluation only) | teacher comparison | Apache-2.0 | not bundled |
 | AMI and ICSI transcripts (training only) | distillation sources | CC BY 4.0 | not bundled |
+| Tatoeba and Europarl (training only) | human anchor of the v1 student | Tatoeba CC BY 2.0 FR; Europarl: no known copyright restrictions (statmt.org) | not bundled |
 | FLORES-200 devtest (evaluation only) | translation regression set | CC BY-SA 4.0 | not bundled |
 | CrisperWhisper 2.0 (optional, evaluation only) | comparison | non-commercial | not bundled |
 
