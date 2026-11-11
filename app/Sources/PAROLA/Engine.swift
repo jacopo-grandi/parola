@@ -110,6 +110,7 @@ final class Engine: ObservableObject {
                (response as? HTTPURLResponse)?.statusCode == 200 {
                 state = .ready(url)
                 startPolling()
+                await checkSubtitlesAvailable()
                 return
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -133,9 +134,87 @@ final class Engine: ObservableObject {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             recording = json
         }
+        // The server says whether subtitles are on, so the web bar and the floater agree; when
+        // the recording or the listening ends the loop stops by itself and the strip goes away.
+        let on = recording["subtitles"] as? Bool ?? false
+        if on != subtitlesOn {
+            subtitlesOn = on
+            if !on { subtitles = [:] }
+        }
+        // The subtitle lines ride the same half-second poll while they are on.
+        if subtitlesOn,
+           let (data, _) = try? await URLSession.shared.data(from: url.appendingPathComponent("api/subtitles")),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            subtitles = json
+        }
     }
 
     var recordingState: String { recording["state"] as? String ?? "idle" }
+
+    /// Subtitles without a recording (decision 0042): the system audio, kept in memory.
+    var listening: Bool { recording["listening"] as? Bool ?? false }
+
+    // MARK: - Live subtitles (ToTTI, decision 0038)
+
+    /// The last /api/subtitles answer while they are on: lines, revision, error.
+    @Published private(set) var subtitles: [String: Any] = [:]
+    /// What the person asked for; the strip and the loop follow this, not the other way.
+    @Published private(set) var subtitlesOn = false
+    /// Whether the translation model is on this disk (checked once when the engine is ready).
+    @Published private(set) var subtitlesAvailable = false
+
+    func setSubtitles(_ on: Bool) {
+        guard let url else { return }
+        var request = URLRequest(url: url.appendingPathComponent("api/subtitles/\(on ? "start" : "stop")"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "{}".data(using: .utf8)
+        Task {
+            if let (data, _) = try? await URLSession.shared.data(for: request),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                subtitlesOn = on && (json["active"] as? Bool ?? false)
+                subtitles = subtitlesOn ? json : [:]
+            } else {
+                subtitlesOn = false
+            }
+        }
+    }
+
+    /// The strip's language: "it" (translated) or "en" (original, with the live tail).
+    func setSubtitlesLang(_ lang: String) {
+        guard let url else { return }
+        var request = URLRequest(url: url.appendingPathComponent("api/subtitles/lang/\(lang)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "{}".data(using: .utf8)
+        Task {
+            if let (data, _) = try? await URLSession.shared.data(for: request),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               subtitlesOn {
+                subtitles = json
+            }
+        }
+    }
+
+    func listen(_ on: Bool) {
+        guard let url else { return }
+        var request = URLRequest(url: url.appendingPathComponent("api/listen/\(on ? "start" : "stop")"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "{}".data(using: .utf8)
+        Task {
+            _ = try? await URLSession.shared.data(for: request)
+            await refresh()
+        }
+    }
+
+    private func checkSubtitlesAvailable() async {
+        guard let url else { return }
+        if let (data, _) = try? await URLSession.shared.data(from: url.appendingPathComponent("api/subtitles")),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            subtitlesAvailable = json["available"] as? Bool ?? false
+        }
+    }
 
     /// False until the first download of the speech models is done (asked in the window).
     var modelsReady: Bool { (recording["models"] as? String ?? "ready") == "ready" }

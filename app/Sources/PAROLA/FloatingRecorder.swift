@@ -1,8 +1,9 @@
 // The floating recorder (phase 8, step 2): a small panel above every other window, Meet
 // included, that can shrink to a blinking dot and be dragged anywhere. It shows up when a
-// recording starts and goes away when it stops. When a call starts it first asks whether to
-// record it, and when the call ends it asks whether to stop (decision 0056): the same panel,
-// so "Registra" turns the question into the recorder where it is.
+// recording starts and goes away when it stops. While listening for subtitles without a
+// recording (decision 0042) it shows too, with a still dot that starts a recording. When a
+// call starts it first asks whether to record it, and when the call ends it asks whether to
+// stop (decision 0056): the same panel, so "Registra" turns the question into the recorder.
 
 import AppKit
 import Combine
@@ -79,20 +80,26 @@ final class FloatingRecorder {
 
     static let full = NSSize(width: 252, height: 48)
     static let icon = NSSize(width: 40, height: 40)
+    /// The bar must grow with the CC toggle, or the dot and the minus touch the borders.
+    static func barWidth(cc: Bool) -> CGFloat { cc ? 290 : full.width }
+    // The subtitle strip under the panel (ToTTI, decision 0038): wide enough to read a line,
+    // so the panel can sit at the screen edge where subtitles normally live.
+    static let stripWidth: CGFloat = 480
+    // Room for the previous line plus two live lines at 16 pt: at 66 the bottom-aligned
+    // stack clipped the previous line whenever the live text wrapped.
+    static let stripHeight: CGFloat = 78
     /// The call question: room for the app's name and two buttons.
     static let prompt = NSSize(width: 372, height: 48)
 
+    private var watchSubs: [AnyCancellable] = []
     private var watchPrompt: AnyCancellable?
-    private var recording = false
+    private var active = false
 
     init(engine: Engine, offer: CallOffer) {
         self.engine = engine
         model.onAction = { [weak engine] action in engine?.record(action) }
         model.onResize = { [weak self] _ in self?.applySize() }
         model.onPrompt = { [weak offer] action in offer?.perform(action) }
-        watch = engine.$recording.sink { [weak self] status in
-            Task { @MainActor in self?.update(status) }
-        }
         watchPrompt = offer.$prompt.sink { [weak self] prompt in
             Task { @MainActor in
                 guard let self else { return }
@@ -102,22 +109,53 @@ final class FloatingRecorder {
                 self.updateVisibility()
             }
         }
+        model.onSubtitles = { [weak engine] on in engine?.setSubtitles(on) }
+        model.onSubsLang = { [weak engine] lang in engine?.setSubtitlesLang(lang) }
+        model.onListen = { [weak engine] on in engine?.listen(on) }
+        watch = engine.$recording.sink { [weak self] status in
+            Task { @MainActor in self?.update(status) }
+        }
+        watchSubs = [
+            engine.$subtitlesOn.sink { [weak self] on in
+                Task { @MainActor in
+                    self?.model.subsOn = on
+                    self?.applySize()
+                }
+            },
+            engine.$subtitlesAvailable.sink { [weak self] available in
+                Task { @MainActor in
+                    self?.model.subsAvailable = available
+                    self?.applySize()  // the CC toggle widens the bar
+                }
+            },
+            engine.$subtitles.sink { [weak self] status in
+                Task { @MainActor in self?.model.applySubtitles(status) }
+            },
+        ]
     }
 
     private func update(_ status: [String: Any]) {
-        recording = (status["state"] as? String) == "recording"
+        let recording = (status["state"] as? String) == "recording"
+        let listening = status["listening"] as? Bool ?? false
+        let changed = listening != model.listening
         model.apply(status)
+        if changed { applySize() }  // the listening bar has no CC toggle: narrower
+        active = recording || listening
         updateVisibility()
     }
 
     private func updateVisibility() {
-        if recording || model.prompt != nil { show() } else { hide() }
+        if active || model.prompt != nil { show() } else { hide() }
     }
 
-    /// The panel's size for what it shows now: a question, the bar, or the dot.
+    /// The panel's size for the current form: the bar or the dot, plus the strip when on.
     private func panelSize() -> NSSize {
-        if model.prompt != nil { return Self.prompt }
-        return model.compact ? Self.icon : Self.full
+        let base = model.prompt != nil ? Self.prompt : model.compact
+            ? Self.icon
+            : NSSize(width: Self.barWidth(cc: model.subsAvailable && !model.listening),
+                     height: Self.full.height)
+        guard model.subsOn else { return base }
+        return NSSize(width: Self.stripWidth, height: base.height + 6 + Self.stripHeight)
     }
 
     private func makePanel() -> RecorderPanel {
@@ -152,9 +190,9 @@ final class FloatingRecorder {
         panel?.orderOut(nil)
     }
 
-    /// Shrink to the dot, grow back, or make room for a question, keeping the top corner on
-    /// the side of the nearer screen edge where it is: a panel at the right edge grows leftward
-    /// and never runs off the screen.
+    /// Shrink to the dot, grow back, make room for a question or for the subtitle strip,
+    /// keeping the top corner on the side of the nearer screen edge where it is: the strip grows
+    /// downward from the bar, and a panel at the right edge grows leftward, never off the screen.
     private func applySize() {
         guard let panel else { return }
         fit(panel, to: panelSize(), animate: true)
@@ -175,21 +213,34 @@ final class FloatingRecorder {
 final class RecorderModel: ObservableObject {
     @Published var elapsed: Double = 0
     @Published var paused = false
+    /// Subtitles without a recording (decision 0042): still dot, no timer, no pause or stop.
+    @Published var listening = false
     @Published var levels: (mic: Double?, system: Double?) = (nil, nil)
     @Published var compact = UserDefaults.standard.bool(forKey: "PAROLARecorderCompact")
-    // Toggled once when the panel appears; the animation repeats it forever. Kept here and not
-    // in a SwiftUI @State, which needs Xcode's macro plugins to compile.
-    @Published var blink = false
+    // Live subtitles (ToTTI, decision 0038): the toggle's state, whether the translation
+    // model is on disk, and the last two Italian lines for the strip.
+    @Published var subsOn = false
+    @Published var subsAvailable = false
+    @Published var subsNow = ""
+    @Published var subsPrev = ""
+    // "it": translated, committed lines only. "en": the original, whose last line carries
+    // the still-provisional tail, dimmed (text at decode latency, refined afterwards).
+    @Published var subsLang = "it"
+    @Published var subsTail = ""
     /// The call question shown instead of the recorder (decision 0056), when there is one.
     @Published var prompt: CallPrompt?
+    var onPrompt: (PromptAction) -> Void = { _ in }
     private var fetchedAt = Date()
     var onAction: (String) -> Void = { _ in }
     var onResize: (Bool) -> Void = { _ in }
-    var onPrompt: (PromptAction) -> Void = { _ in }
+    var onSubtitles: (Bool) -> Void = { _ in }
+    var onSubsLang: (String) -> Void = { _ in }
+    var onListen: (Bool) -> Void = { _ in }
 
     func apply(_ status: [String: Any]) {
         elapsed = status["elapsed"] as? Double ?? 0
         paused = status["paused"] as? Bool ?? false
+        listening = (status["state"] as? String) != "recording" && (status["listening"] as? Bool ?? false)
         let lv = status["levels"] as? [String: Double] ?? [:]
         levels = (lv["mic"], lv["system"])
         fetchedAt = Date()
@@ -207,26 +258,106 @@ final class RecorderModel: ObservableObject {
         UserDefaults.standard.set(compact, forKey: "PAROLARecorderCompact")
         onResize(compact)
     }
+
+    func toggleSubs() {
+        onSubtitles(!subsOn)
+    }
+
+    func toggleSubsLang() {
+        onSubsLang(subsLang == "it" ? "en" : "it")
+    }
+
+    func applySubtitles(_ status: [String: Any]) {
+        if let lang = status["lang"] as? String { subsLang = lang }
+        let lines = status["lines"] as? [[String: Any]] ?? []
+        let key = subsLang == "en" ? "en" : "it"
+        let shown = lines.compactMap { $0[key] as? String }.filter { !$0.isEmpty }
+        subsNow = shown.last ?? ""
+        subsPrev = shown.count > 1 ? shown[shown.count - 2] : ""
+        subsTail = subsLang == "en" ? (status["tail"] as? String ?? "") : ""
+    }
 }
 
 struct RecorderView: View {
     @ObservedObject var model: RecorderModel
-    private var blink: Bool { model.blink }
 
     var body: some View {
-        Group {
-            if let prompt = model.prompt { CallPromptBar(prompt: prompt, act: model.onPrompt) }
-            else if model.compact { icon } else { full }
+        VStack(alignment: .leading, spacing: 6) {
+            Group {
+                if let prompt = model.prompt { CallPromptBar(prompt: prompt, act: model.onPrompt) }
+                else if model.compact { icon } else if model.listening { listenBar } else { full }
+            }
+            // The subtitle strip hangs under the bar (and under the dot too), so the panel
+            // can sit at the screen edge where subtitles normally live (decision 0038).
+            if model.subsOn { strip }
         }
-        .onAppear { model.blink = true }
     }
 
+    private var strip: some View {
+        ZStack(alignment: .topTrailing) {
+            VStack(alignment: .leading, spacing: 2) {
+                if !model.subsPrev.isEmpty {
+                    Text(model.subsPrev)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
+                liveLine
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            // The language of the strip: Italian translated, or the English original.
+            Button(model.subsLang == "en" ? "EN" : "IT") { model.toggleSubsLang() }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.65))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.14)))
+                .padding(6)
+                .help(model.subsLang == "en"
+                      ? "Inglese originale · clic per l'italiano tradotto"
+                      : "Italiano tradotto · clic per l'inglese originale")
+        }
+        .frame(width: FloatingRecorder.stripWidth, height: FloatingRecorder.stripHeight)
+        .background(DragArea(onClick: nil, onDoubleClick: { AppDelegate.shared?.showMainWindow() }))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.88)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.12)))
+    }
+
+    /// The live line: committed text plain and, in the EN view, the provisional tail dimmed.
+    /// Head truncation, like broadcast subtitles: when the line overflows, the START is cut,
+    /// never the end — the end is where the new words (and the whole EN tail) appear, and
+    /// with the default tail truncation they were invisible until a sentence closed, which
+    /// read as "the subtitles move one sentence at a time".
+    private var liveLine: some View {
+        let empty = model.subsNow.isEmpty && model.subsTail.isEmpty
+        let joint = model.subsNow.isEmpty || model.subsTail.isEmpty ? "" : " "
+        return (Text(empty ? "Sottotitoli in arrivo…" : model.subsNow)
+                    .foregroundColor(empty ? .white.opacity(0.5) : .white)
+                + Text(joint + model.subsTail)
+                    .foregroundColor(.white.opacity(0.45)))
+            .font(.system(size: 16, weight: .medium))
+            .lineLimit(2)
+            .truncationMode(.head)
+    }
+
+    /// Blinks while recording; still while paused (grey) or only listening (decision 0042).
+    /// The phase comes from the clock, so the blinking starts again by itself when listening
+    /// turns into a recording.
     private var dot: some View {
-        Circle()
-            .fill(model.paused ? Color.gray : Color.red)
-            .frame(width: 11, height: 11)
-            .opacity(model.paused ? 0.6 : (blink ? 0.25 : 1))
-            .animation(model.paused ? .default : .easeInOut(duration: 0.6).repeatForever(), value: blink)
+        TimelineView(.periodic(from: .now, by: 0.6)) { context in
+            let dim = Int(context.date.timeIntervalSinceReferenceDate / 0.6) % 2 == 0
+            Circle()
+                .fill(model.paused ? Color.gray : Color.red)
+                .frame(width: 11, height: 11)
+                .opacity(model.paused ? 0.6 : (!model.listening && dim ? 0.25 : 1))
+                .animation(.easeInOut(duration: 0.6), value: dim)
+        }
+        .frame(width: 11, height: 11)
     }
 
     private var icon: some View {
@@ -238,7 +369,9 @@ struct RecorderView: View {
             DragArea(onClick: model.toggleSize, onDoubleClick: { AppDelegate.shared?.showMainWindow() })
                 .clipShape(Circle())
         }
-        .help("In registrazione: clic per aprire il pannello, doppio clic per P.A.R.O.L.A., trascina per spostare")
+        .help(model.listening
+            ? "Sottotitoli: clic per aprire il pannello, doppio clic per P.A.R.O.L.A., trascina per spostare"
+            : "In registrazione: clic per aprire il pannello, doppio clic per P.A.R.O.L.A., trascina per spostare")
         .frame(width: FloatingRecorder.icon.width, height: FloatingRecorder.icon.height)
     }
 
@@ -264,12 +397,52 @@ struct RecorderView: View {
             control(model.paused ? "play.fill" : "pause.fill", model.paused ? "Riprendi" : "Pausa") {
                 model.onAction(model.paused ? "resume" : "pause")
             }
+            if model.subsAvailable {
+                control("captions.bubble", "Sottotitoli live", active: model.subsOn) {
+                    model.toggleSubs()
+                }
+            }
             control("stop.fill", "Ferma e trascrivi") { model.onAction("stop") }
             control("minus", "Riduci a icona") { model.toggleSize() }
         }
         .padding(.horizontal, 14)
-        .frame(width: FloatingRecorder.full.width, height: FloatingRecorder.full.height)
+        .frame(width: FloatingRecorder.barWidth(cc: model.subsAvailable),
+               height: FloatingRecorder.full.height)
         // Anywhere but the buttons drags the panel; a double click brings the app in front.
+        .background(DragArea(onClick: nil, onDoubleClick: { AppDelegate.shared?.showMainWindow() }))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.88)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.12)))
+    }
+
+    /// Listening without recording (decision 0042): the still dot starts a recording, × switches
+    /// the subtitles off. No timer, no pause, no stop: nothing is being recorded.
+    private var listenBar: some View {
+        HStack(spacing: 10) {
+            Button(action: { model.onAction("start") }) {
+                dot.frame(width: 26, height: 26).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, -8)  // the dot sits where it does in the recording bar
+            .help("Registra la call da adesso")
+            .accessibilityLabel("Registra")
+            Group {
+                Text("Sottotitoli")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .fixedSize()
+                meter(model.levels.system).frame(width: 44)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, -8)
+            .allowsHitTesting(false)  // clicks here fall through to the drag area
+            control("minus", "Riduci a icona") { model.toggleSize() }
+            control("xmark", "Spegni i sottotitoli") { model.onListen(false) }
+        }
+        .padding(.horizontal, 14)
+        .frame(width: FloatingRecorder.barWidth(cc: false), height: FloatingRecorder.full.height)
         .background(DragArea(onClick: nil, onDoubleClick: { AppDelegate.shared?.showMainWindow() }))
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.88)))
@@ -289,11 +462,12 @@ struct RecorderView: View {
         .frame(height: 3)
     }
 
-    private func control(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> some View {
+    private func control(_ symbol: String, _ label: String, active: Bool = false,
+                         _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(active ? Color.accentColor : .white.opacity(0.85))
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
         }

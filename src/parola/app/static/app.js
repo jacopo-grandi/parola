@@ -628,6 +628,8 @@ async function render(data, after) {
   reviewFrom = null;  // set again below after a correction; a different call starts clean
   editing = null;
   view = {};
+  view.turns = [];  // one {el, text, si} per segment, for the translation lines (ToTTI, 0038)
+  if (transName !== recName) { transOn = false; clearTimeout(transTimer); }
 
   const body = el("div", { class: "transcript" });
   // Identical doubtful lines in a row ("Thank you." written over a noisy stretch, decision
@@ -709,12 +711,12 @@ async function render(data, after) {
                        onclick: e => renameVoice(e.currentTarget, seg.speaker) },
           rec.voices[seg.speaker] || seg.speaker)
       : el("div", { class: `who ${channel}` }, LABELS[channel] ?? channel);
-    body.append(el("div", { class: inFold.has(si) ? "turn fold" : "turn",
-                            "data-fold": inFold.has(si) ? String(inFold.get(si).start) : null,
-                            lang: seg.lang || null, "data-channel": channel,
-                            // String(), not the boolean: el() writes `true` as an empty
-                            // attribute, and the doubts filter compares against "true".
-                            "data-key": key, "data-doubt": String(seg.words.some(w => w.doubtful)) },
+    const turn = el("div", { class: inFold.has(si) ? "turn fold" : "turn",
+                             "data-fold": inFold.has(si) ? String(inFold.get(si).start) : null,
+                             lang: seg.lang || null, "data-channel": channel,
+                             // String(), not the boolean: el() writes `true` as an empty
+                             // attribute, and the doubts filter compares against "true".
+                             "data-key": key, "data-doubt": String(seg.words.some(w => w.doubtful)) },
       who,
       // The voice menu lives in the time column: its clicks must not start the audio.
       el("span", { class: "t", onclick: e => { if (!e.target.closest(".menu, .turn-voice")) play(first); } },
@@ -722,7 +724,9 @@ async function render(data, after) {
         voiced && showVoices ? el("button", {
           class: "turn-voice", title: "Di chi è questa battuta", "aria-label": "Cambia voce",
           onclick: e => { e.stopPropagation(); voiceMenu(e.currentTarget, si); } }, "•") : null),
-      text));
+      text);
+    body.append(turn);
+    view.turns.push({ el: turn, text, si });
   });
   if (rec.provisional) {
     // Whisper is done, the rest is still running (decision 0031): the text can be read and
@@ -758,8 +762,17 @@ async function render(data, after) {
   const more = iconButton("more", "Esporta", e => { e.stopPropagation(); exportMenu(actions); });
   const undoBtn = iconButton("undo", "Annulla l'ultima modifica (⌘Z)", undo);
   undoBtn.disabled = !rec.summary.edits || !!rec.provisional;
+  // Translation EN→IT (ToTTI, 0038): only with the model on disk and a final transcript.
+  view.transNote = el("span", { class: "trans-note" });
+  view.transBtn = subsAvailable && !rec.provisional
+    ? el("button", { class: "icon-btn trans-btn", title: "Traduci in italiano",
+                     "aria-label": "Traduci in italiano", "aria-pressed": "false",
+                     onclick: transAction }, "IT")
+    : null;
+  updateTransBtn();
   // Exports read the final file: none while the transcript is provisional.
-  const actions = el("div", { class: "actions" }, voicesBtn, view.filter, undoBtn,
+  const actions = el("div", { class: "actions" }, view.transNote, view.transBtn,
+                     voicesBtn, view.filter, undoBtn,
                      rec.provisional ? null : more);
   view.findInput = el("input", { class: "find-input", type: "search",
                                  placeholder: "Trova nella call  ⌘F",
@@ -855,6 +868,105 @@ async function render(data, after) {
   if (item && item.to_review !== rec.summary.to_review) {
     item.to_review = rec.summary.to_review;
     renderCalls();
+  }
+
+  // The translation was on (e.g. before a correction): fetch it again, the server cache
+  // follows the transcript's file, so an edit re-derives the Italian (ToTTI, 0038).
+  if (transOn && transName === recName) refreshTrans();
+}
+
+// ---------------------------------------------------------------- translation (ToTTI, 0038)
+
+let transOn = false;     // the person asked for the Italian of the open call
+let transName = null;    // which call it was asked for
+let transTimer = null;
+function transAction() {
+  transOn = !transOn;
+  transName = recName;
+  updateTransBtn();
+  if (!transOn) {
+    clearTimeout(transTimer);
+    setTransNote("");
+    applyTrans(null);
+    return;
+  }
+  refreshTrans();
+}
+
+function updateTransBtn() {
+  if (!view.transBtn) return;
+  const on = transOn && transName === recName;
+  view.transBtn.classList.toggle("on", on);
+  view.transBtn.setAttribute("aria-pressed", String(on));
+}
+
+function setTransNote(text) {
+  if (view.transNote) view.transNote.textContent = text;
+}
+
+function engineLabel(engine) {
+  // The static tag beside the IT button: the view always says who translated (0044's one
+  // engine is ToTTI v1; anything else on screen would mean a stale server or cache).
+  if (!engine) return "";
+  if (engine.includes("totti-v1")) return "ToTTI v1";
+  if (engine.includes("totti-a30")) return "ToTTI v0";
+  if (engine.includes("madlad")) return "Maestro";
+  if (engine === "opus-mt-en-it-ct2") return "Base";
+  return engine;
+}
+
+async function refreshTrans() {
+  const name = recName;
+  try {
+    pollTrans(name, await postJSON(`/api/recordings/${enc(name)}/translate`));
+  } catch (e) {
+    transOn = false;
+    updateTransBtn();
+    toast(`Traduzione non partita: ${e.message}`);
+  }
+}
+
+async function pollTrans(name, st) {
+  clearTimeout(transTimer);
+  if (!transOn || recName !== name) return;
+  if (!st) {
+    try { st = await getJSON(`/api/recordings/${enc(name)}/translation`); }
+    catch (e) { transTimer = setTimeout(() => pollTrans(name), 1500); return; }
+  }
+  if (st.state === "working") {
+    setTransNote(st.total ? `Traduzione… ${Math.round((st.done / st.total) * 100)}%`
+                          : "Traduzione…");
+    transTimer = setTimeout(() => pollTrans(name), 800);
+  } else if (st.state === "ready") {
+    setTransNote(engineLabel(st.engine));
+    if (!Object.keys(st.lines).length) {
+      transOn = false;
+      updateTransBtn();
+      setTransNote("");
+      toast("Niente da tradurre: la call non ha battute in inglese.");
+      return;
+    }
+    applyTrans(st.lines);
+  } else if (st.state === "error") {
+    transOn = false;
+    updateTransBtn();
+    setTransNote("");
+    toast(`Traduzione fallita: ${st.message}`);
+  } else {
+    // "missing": a correction landed meanwhile and the cache is stale; derive it again.
+    refreshTrans();
+  }
+}
+
+function applyTrans(lines) {
+  // Split view, English | Italian side by side: each turn gets an Italian cell aligned with
+  // its text row (empty for lines with nothing to translate, so the rule stays continuous).
+  // A derived layer, visibly distinct from the verbatim and never mixed with it.
+  if (view.body) view.body.classList.toggle("split", !!lines);
+  for (const t of view.turns || []) {
+    const old = t.el.querySelector(".trans");
+    if (old) old.remove();
+    if (lines) t.el.append(el("div", { class: "trans", lang: "it" }, lines[String(t.si)] || ""));
   }
 }
 
@@ -1091,15 +1203,24 @@ function buildLive(floating) {
                                       "l'ingresso in Impostazioni di Sistema > Suono" },
     "mic muto?");
   const stop = iconButton("stop", "Ferma e trascrivi", () => recAction("stop"), "rec-stop");
+  // Live subtitles (ToTTI, decision 0038): only where the translation model is on disk.
+  const subs = floating || !subsAvailable ? null
+    : el("button", { class: "icon-btn subs-btn", title: "Sottotitoli live",
+                     "aria-label": "Sottotitoli live", "aria-pressed": "false",
+                     onclick: () => subsAction(!subsOn) }, "CC");
   // In the native app the floating window is the app's own panel (phase 8, step 2).
   const pop = floating || window.parolaNative ? null
     : iconButton("popout", "Finestra mobile", () => openFloating(false));
   const root = el("div", { class: floating ? "rec-live pip-bar" : "rec-live" },
-    dot, time, meters, micWarn, pause, pop, stop);
+    dot, time, meters, micWarn, pause, subs, pop, stop);
   return {
     root,
     update(st, micMute = false) {
       micWarn.hidden = !micMute;
+      if (subs) {
+        subs.classList.toggle("on", subsOn);
+        subs.setAttribute("aria-pressed", String(subsOn));
+      }
       dot.classList.toggle("blink", !st.paused);
       dot.style.opacity = st.paused ? "0.35" : "";
       time.textContent = clock(liveElapsed());
@@ -1151,7 +1272,8 @@ function renderRecorder() {
   // While a file uploads or a call is transcribed the controls stay, disabled: the progress is
   // on the call itself, at the top of the list (renderPending).
   const busy = !!uploading || st.state === "transcribing";
-  const mode = st.state === "recording" ? "recording" : `idle:${st.state}:${st.name}:${busy}`;
+  const mode = st.state === "recording" ? "recording"
+    : `idle:${st.state}:${st.name}:${busy}:${!!st.listening}:${subsAvailable}`;
   renderPending();
   if (mode !== recMode) {
     recMode = mode;
@@ -1172,12 +1294,22 @@ function renderRecorder() {
         el("span", { class: "rec-dot" }), "Registra");
       const pick = iconButton("upload", "Trascrivi un file audio o video", () => $file.click(),
                               "rec-import");
-      pick.disabled = busy;
+      pick.disabled = busy || !!st.listening;
+      // Subtitles without recording (decision 0042): the floater opens with the strip, the
+      // audio stays in memory; Registra (or the floater's dot) turns it into a recording.
+      const listening = !!st.listening;
+      const ccLabel = listening ? "Spegni i sottotitoli" : "Sottotitoli live senza registrare";
+      const cc = subsAvailable
+        ? el("button", { class: `rec-cc subs-btn${listening ? " on" : ""}`, disabled: busy,
+                         title: ccLabel, "aria-label": ccLabel, "aria-pressed": String(listening),
+                         onclick: () => listenAction(!listening) }, "CC")
+        : null;
       const note = busy ? null : st.state === "done" && st.name
         ? el("p", { class: "rec-note" }, "Trascritta: ",
              el("a", { href: `#/rec/${enc(st.name)}` }, "apri"))
         : st.state === "error" ? el("p", { class: "rec-note err" }, st.message) : null;
-      $recorder.replaceChildren(el("div", { class: "rec-row" }, start, pick, lang), note || "");
+      $recorder.replaceChildren(el("div", { class: "rec-row" }, start, cc, pick, lang),
+                                note || "");
     }
   }
   const micMute = micLooksMute(st);  // one sample per poll, shared by sidebar and floater
@@ -1283,16 +1415,31 @@ async function refreshShown(final) {
   }
 }
 
+// Visible versioning (decision 0045): a discreet corner says which commit the engine runs,
+// and when the repo on disk has moved past it, that a restart brings the new code.
+const $build = el("div", { class: "build-tag", hidden: true });
+document.body.append($build);
+
+function renderBuild(build) {
+  if (!build || !build.engine) { $build.hidden = true; return; }
+  $build.hidden = false;
+  $build.replaceChildren(`build ${build.engine}`,
+    build.stale ? el("span", { class: "build-stale" },
+                     " · codice aggiornato: riavvia PAROLA") : "");
+}
+
 function setRecState(st) {
   const prev = recState;
   recState = st;
   recAt = Date.now();
+  renderBuild(st.build);
   // A new recording captures the system audio: a call playing in the app would be recorded
   // over the real one, so playback pauses by itself, however the recording was started.
   if (startedRecording(prev.state, st.state) && playing()) {
     stopAll();
     toast("Riproduzione in pausa: registrazione avviata");
   }
+  followSubs(prev, st);
   renderRecorder();
   if (st.state === "transcribing" && st.preview && st.name &&
       (st.preview !== prev.preview || st.revision !== prev.revision)) {
@@ -1470,12 +1617,114 @@ function closeFloating() {
   if (pip) pip.close();
 }
 
+// ---------------------------------------------------------------- live subtitles (ToTTI, 0038)
+
+let subsOn = false;          // subtitles on, for this recording or while listening (server's)
+let subsAvailable = false;   // the translation model is on disk (checked once at startup)
+let subsLang = "it";         // the strip's language, held by the server like the toggle
+let subsTimer = null;
+let subsRevision = -1;
+const $subs = el("div", { class: "subtitles", role: "status", hidden: true });
+document.body.append($subs);
+
+async function listenAction(on) {
+  try {
+    setRecState(await postJSON(`/api/listen/${on ? "start" : "stop"}`));
+  } catch (e) { toast(`Sottotitoli non partiti: ${e.message}`); }
+}
+
+async function subsAction(on) {
+  try {
+    const st = await postJSON(`/api/subtitles/${on ? "start" : "stop"}`);
+    subsOn = on && st.active;
+  } catch (e) {
+    subsOn = false;
+    toast(`Sottotitoli non partiti: ${e.message}`);
+  }
+  subsRevision = -1;
+  renderSubs(null);
+  for (const v of liveViews) v.update(recState);
+  if (subsOn) pollSubs();
+}
+
+async function setSubsLang(lang) {
+  if (lang === subsLang) return;
+  try {
+    const st = await postJSON(`/api/subtitles/lang/${lang}`);
+    subsLang = st.lang;
+    subsRevision = -1;
+    pollSubs();
+  } catch (e) { toast(`Lingua non cambiata: ${e.message}`); }
+}
+
+function renderSubs(st) {
+  const lines = (st && st.lines) || [];
+  const tail = (st && st.tail) || "";
+  const show = subsOn && (lines.length || (subsLang === "en" && tail));
+  $subs.hidden = !show;
+  if (!show) { $subs.replaceChildren(); return; }
+  const chip = value => el("button",
+    { class: "subs-lang" + (subsLang === value ? " active" : ""),
+      title: value === "it" ? "Italiano tradotto" : "Inglese originale",
+      onclick: () => setSubsLang(value) },
+    value.toUpperCase());
+  const head = el("div", { class: "subs-head" }, chip("it"), chip("en"));
+  let rows;
+  if (subsLang === "it") {
+    // The last two committed lines, like broadcast subtitles: Italian to read, the English
+    // underneath so every line traces back to what was actually said.
+    rows = lines.slice(-2).map(l =>
+      el("div", { class: "subs-line" },
+        el("div", { class: "subs-it" }, l.it),
+        el("div", { class: "subs-en" }, l.en)));
+  } else {
+    // The original: committed text plain, and the still-provisional tail dimmed right
+    // after it (YouTube-caption style: text at decode latency, refined afterwards).
+    const last = el("div", { class: "subs-it", lang: "en" },
+      lines.length ? lines[lines.length - 1].en : "",
+      tail ? el("span", { class: "subs-tail" }, (lines.length ? " " : "") + tail) : null);
+    rows = [...lines.slice(-2, -1).map(l => el("div", { class: "subs-it", lang: "en" }, l.en)),
+            last];
+  }
+  $subs.replaceChildren(head, ...rows);
+}
+
+async function pollSubs() {
+  clearTimeout(subsTimer);
+  if (!subsOn) { renderSubs(null); return; }
+  try {
+    const st = await getJSON("/api/subtitles");
+    const langChanged = st.lang && st.lang !== subsLang;
+    if (langChanged) subsLang = st.lang;  // the floater may have switched it
+    if (st.revision !== subsRevision || langChanged) {
+      subsRevision = st.revision;
+      renderSubs(st);
+    }
+  } catch (e) { /* server busy: the next poll retries */ }
+  // Measured 2026-10-19: the loop publishes every ~2-3 s; a 0.6 s poll adds ~0.3 s of
+  // average delay instead of ~0.75, for a tiny localhost request.
+  subsTimer = setTimeout(pollSubs, 600);
+}
+
+function followSubs(prev, st) {
+  // The server says whether subtitles are on (the floater may have switched them): when the
+  // recording or the listening ends, its loop stops by itself and the strip goes away.
+  const was = subsOn;
+  subsOn = !!st.subtitles;
+  if (subsOn && !was) { subsRevision = -1; pollSubs(); }
+  if (!subsOn && was) { clearTimeout(subsTimer); renderSubs(null); }
+  if (prev.listening && !st.listening && st.listen_error) {
+    toast(`Sottotitoli interrotti: ${st.listen_error}`);
+  }
+}
+
 async function poll() {
   try { setRecState(await getJSON("/api/record/status")); } catch (e) { /* server restarting */ }
   const active = ["recording", "transcribing"].includes(recState.state);
   clearTimeout(pollTimer);
   // The floating window stays visible when this tab is in the background: tick from there.
-  pollTimer = (pip || window).setTimeout(poll, active ? 250 : 3000);
+  // While listening, often enough that the CC button follows the floater's ×.
+  pollTimer = (pip || window).setTimeout(poll, active ? 250 : recState.listening ? 1000 : 3000);
 }
 
 // ---------------------------------------------------------------- first run: the models
@@ -1598,3 +1847,10 @@ window.addEventListener("hashchange", route);
 refreshCalls().catch(() => {}).then(route);
 poll();
 pollModels();
+// Live subtitles (ToTTI, 0038): the toggle only shows up when the translation model is there.
+getJSON("/api/subtitles").then(st => {
+  subsAvailable = st.available;
+  subsLang = st.lang || "it";
+  // A recording may already be on (page opened mid-call): rebuild the recorder with the toggle.
+  if (subsAvailable) { recMode = null; renderRecorder(); }
+}).catch(() => {});

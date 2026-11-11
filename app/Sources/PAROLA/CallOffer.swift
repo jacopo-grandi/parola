@@ -148,6 +148,11 @@ final class CallOffer: ObservableObject {
         keepRecording = false
         if prompt?.kind == .ended { close() }
         if prompt?.starting == true { return }  // waiting for the engine to say "recording"
+        // Listening for subtitles (decision 0042) already shows its own bar, which records.
+        if engine.listening {
+            if prompt != nil { close() }
+            return
+        }
         if let prompt, prompt.kind == .offer, prompt.app != call { close() }  // the call ended
         guard let call, prompt == nil, askedSession != call.session,
               state != "transcribing", engine.modelsReady, engine.url != nil

@@ -79,7 +79,8 @@ struct PAROLAApp: App {
                 .environmentObject(detector)
                 .environmentObject(offer)
         } label: {
-            Image(systemName: engine.recordingState == "recording" ? "record.circle.fill" : "waveform")
+            Image(systemName: engine.recordingState == "recording" ? "record.circle.fill"
+                  : engine.listening ? "captions.bubble.fill" : "waveform")
         }
     }
 }
@@ -133,6 +134,7 @@ struct MenuContent: View {
             Text("Trascrizione in corso…")
         default:
             if engine.modelsReady {
+                if engine.listening { Text("● Sottotitoli attivi") }
                 // During a call, the call by name (decision 0056): "Registra la call su Zoom".
                 if detector.call != nil, let call = offer.currentCall {
                     Button("Registra la c" + call.title.dropFirst()) { offer.recordCurrentCall() }
@@ -140,6 +142,13 @@ struct MenuContent: View {
                 } else {
                     Button("Registra una call") { engine.record("start") }
                         .disabled(engine.url == nil)
+                }
+                // Subtitles without recording (decision 0042).
+                if engine.subtitlesAvailable {
+                    Button(engine.listening ? "Spegni i sottotitoli" : "Sottotitoli EN→IT") {
+                        engine.listen(!engine.listening)
+                    }
+                    .disabled(engine.url == nil)
                 }
             } else {
                 // The first download is asked in the window, with its size and progress.
@@ -158,8 +167,17 @@ struct MenuContent: View {
         Divider()
         Button("Apri P.A.R.O.L.A.") { open() }
         Divider()
+        // Visible versioning (decision 0045): which build this is, at a glance.
+        Text(buildLine)
         Button("Esci") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private var buildLine: String {
+        let info = Bundle.main
+        let commit = info.object(forInfoDictionaryKey: "PAROLABuildCommit") as? String ?? "?"
+        let date = info.object(forInfoDictionaryKey: "PAROLABuildDate") as? String ?? "?"
+        return "Build \(commit) · \(date)"
     }
 
     private func open() {

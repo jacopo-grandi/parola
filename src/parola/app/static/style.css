@@ -297,6 +297,11 @@ kbd { font: var(--text-caption) var(--font-num); padding: 0 4px; border: 1px sol
 .drop span { font-size: var(--text-small); color: var(--fg-2); }
 .rec-row .rec-import { width: auto; height: auto; padding: 0 8px; border-radius: var(--radius);
                        background: var(--raise); }
+.rec-row .rec-cc { flex: none; padding: 0 8px; border-radius: var(--radius); background: var(--raise);
+                   color: var(--fg-2); }
+.rec-row .rec-cc:hover { background: var(--hover); }
+.rec-row .rec-cc.on { color: var(--accent); background: rgba(10, 132, 255, 0.12); }
+.rec-row .rec-cc:disabled { opacity: 0.4; cursor: default; }
 
 .toast {
   position: fixed; left: 50%; bottom: 72px; transform: translate(-50%, 8px); z-index: 10;
@@ -384,3 +389,50 @@ body.pip .rec-live.pip-bar { height: 100vh; border: 0; border-radius: 0; padding
 .fresh { animation: fresh 0.5s ease-out both; }
 @keyframes fresh { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .fresh { animation: none; } }
+
+/* ------------------------------------------------- live subtitles (ToTTI, decision 0038) */
+.subs-btn { font: 700 10px var(--font-ui); letter-spacing: 0.5px; }
+.subs-btn.on { color: var(--accent); background: rgba(10, 132, 255, 0.12); }
+/* display: grid beats the UA's [hidden] rule, so the empty strip showed while off. */
+.subtitles[hidden] { display: none; }
+.subtitles {
+  position: fixed; left: calc(var(--side-w) + (100vw - var(--side-w)) / 2); bottom: 24px;
+  transform: translateX(-50%); z-index: 9; width: min(680px, calc(100vw - var(--side-w) - 48px));
+  display: grid; gap: 10px; padding: 12px 18px; border-radius: 12px; text-align: center;
+  background: rgba(10, 10, 11, 0.92); border: 1px solid var(--line); box-shadow: 0 12px 32px #000;
+}
+.subs-line { display: grid; gap: 2px; }
+.subs-it { font: 500 var(--text-heading)/1.4 var(--font-ui); }
+.subs-en { font-size: var(--text-caption); color: var(--fg-3); }
+/* The language toggle sits in the strip's corner; the provisional EN tail reads dimmed. */
+.subs-head { position: absolute; top: 6px; right: 8px; display: flex; gap: 2px; }
+.subs-lang { font-size: 11px; padding: 1px 7px; border-radius: 6px; cursor: pointer;
+             border: 1px solid var(--line); background: transparent; color: var(--fg-3); }
+.subs-lang.active { background: rgba(255, 255, 255, 0.14); color: inherit; }
+.subs-tail { opacity: 0.55; font-weight: 400; }
+
+/* --------------------------------------------- call translation (ToTTI, decision 0038) */
+.trans-btn { font: 700 10px var(--font-ui); letter-spacing: 0.5px; }
+.trans-btn.on { color: var(--accent); background: rgba(10, 132, 255, 0.12); }
+.trans-note { font-size: var(--text-caption); color: var(--fg-3); align-self: center; white-space: nowrap; }
+/* With the translation on, the transcript splits like two panes: verbatim left, Italian
+   right, aligned turn by turn. */
+.transcript.split { max-width: calc(152px + 2 * var(--read-ems) * var(--read-size)); }
+.transcript.split .turn { grid-template-columns: 48px minmax(0, 1fr) minmax(0, 1fr);
+                          grid-template-rows: auto auto; }
+.transcript.split .who { grid-row: 1; grid-column: 2; }
+.transcript.split .turn .t { grid-row: 2; grid-column: 1; }
+.transcript.split .turn .text { grid-row: 2; grid-column: 2; }
+.turn .trans { display: none; }
+.transcript.split .turn .trans {
+  display: block; grid-row: 2; grid-column: 3; padding-left: 20px; margin-left: 2px;
+  border-left: 1px solid var(--line);
+  font: var(--read-size)/var(--read-leading) var(--font-read); color: var(--fg-2);
+}
+
+/* Engine picker for the IT view ("alla Anthropic": name + tagline). */
+
+/* ------------------------------------------------ visible versioning (decision 0045) */
+.build-tag { position: fixed; left: 10px; bottom: 6px; z-index: 8; font-size: 10.5px;
+             color: var(--fg-3); opacity: 0.7; pointer-events: none; }
+.build-stale { color: #ffb340; opacity: 1; }

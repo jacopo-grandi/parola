@@ -7,6 +7,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 app="$repo/dist/PAROLA.app"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/pyproject.toml" | head -1)
+# Visible versioning (decision 0045): the build carries the commit it was compiled from.
+commit=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
+builddate=$(date +%Y-%m-%d)
 
 swift build -c release --package-path "$here"
 rm -rf "$app"
@@ -54,6 +57,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>PAROLAEngine</key><string>$repo/.venv/bin/parola</string>
   <key>PAROLADataDir</key><string>$repo/data/private/calls</string>
+  <key>PAROLABuildCommit</key><string>$commit</string>
+  <key>PAROLABuildDate</key><string>$builddate</string>
 </dict>
 </plist>
 PLIST
