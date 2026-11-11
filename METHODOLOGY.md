@@ -370,152 +370,23 @@ CC BY-SA 4.0).
 
 ## Translation into Italian (ToTTI)
 
-English calls can be followed in Italian. An "IT" toggle in the call view shows an Italian
-translation under each English line, and during a recording the same engine writes live
-subtitles. The translation is a derived layer like the clean version and the title: it is
-computed from the verbatim transcript, cached apart from it, and re-derived when the transcript
-changes, so a corrected word corrects its translation too. It never touches the verbatim — each
-Italian line sits under the English segment it comes from, with its timestamps — and the live
-subtitles are ephemeral: the full-quality transcription still runs at the end of the call as
-usual.
+English calls can be followed in Italian: an "IT" toggle in the call view shows an Italian
+translation under each English line, and the same engine writes live subtitles. The
+translation is a derived layer like the clean version and the title: computed from the
+verbatim transcript, cached apart from it, re-derived when the transcript changes, and never
+written into it.
 
-The engine is Opus-MT en-it (Helsinki-NLP) converted to CTranslate2 int8: 87 MB, about 40 ms
-per sentence on the CPU, so Whisper keeps the GPU during a call. Larger models were rejected
-for this seat: MADLAD-400 3B translates better but weighs over 6 GB, a local LLM can invent
-text — the one thing subtitles must not do — and NLLB's licence is non-commercial.
+The engine, ToTTI v1, is Opus-MT en-it (78M parameters, 87 MB in CTranslate2 int8) distilled
+from MADLAD-400-3B-MT on public meeting transcripts, with a human anchor from Tatoeba and
+Europarl, and interpolated with its base. It translates about 40 sentences per second on the
+CPU, so Whisper keeps the GPU during a call. It is measured like the transcript: 406
+hand-translated pairs from the app's own verbatim output, chrF and BLEU with counters for
+copied and inflated output, FLORES-200 as the general-register guard, and gates fixed before
+measuring. It scores chrF 54.3, +2.1 over its base; the slower teacher and Apple Translation
+score higher, and the live subtitles show final text about 3.4 seconds after it is spoken.
 
-### Measured like the transcript
-
-- The test set started as **224 EN→IT pairs from two of the author's English recordings** (a
-  lecture and a conversation, with the speakers' consent) and grew to **406** with two public
-  meetings from YouTube (a GitLab team meeting, and a council meeting in formal procedural
-  English): the sources are verbatim ASR segments, the references translated by hand. Like the
-  audio, the pairs are never committed.
-- A design choice worth stating plainly: the source sentences are the transcripts P.A.R.O.L.A.
-  actually produces, residual ASR errors included, and the gold translates the transcript, not
-  the idealized speech (stretches with unresolved doubts are excluded from pairing). The meter
-  therefore measures translation of the production input — harder and more representative than
-  clean text — and by construction it does not reward fixing transcription errors from context;
-  judging that robustness would need a dedicated slice with gold translated from the audio.
-- The metrics are corpus **chrF** (primary: character level, so Italian morphology costs a
-  little, not a whole word) and **BLEU**, via sacrebleu, with two declared counters the scores
-  cannot see — subtitles must not invent: **copies** (sources left untranslated) and
-  **inflated** (translations over 1.6 times their source's length, which suggests added
-  content). Metrics and counters have hand-built unit tests, as the WER does.
-- **FLORES-200 devtest** (1,012 professionally translated EN→IT sentences, CC BY-SA 4.0) is
-  the general-domain regression guard: a model that gets better on calls by getting worse at
-  ordinary English is refused.
-
-The base engine scores chrF 56.1 on the domain set (224 pairs at the time) and 57.6 on FLORES, with no copies and no
-inflated output ([report](results/2026-10-19-totti-baseline-en-it.md)).
-
-### A teacher chosen by the numbers
-
-To improve the engine without making it heavier, the path is sequence-level distillation: a
-large, cleanly licensed teacher translates in-domain English, and those pairs fine-tune the
-small student. The bar was fixed before measuring: the teacher must beat the student by about
-+3 chrF on the domain set, otherwise distillation is not worth the trouble.
-
-Two candidates, both Apache-2.0 (licences checked by hand on the model cards): MADLAD-400-3B-MT
-and Qwen3-4B-Instruct. On the lecture alone neither cleared the bar (the best gap was +2.0) and
-the work would have stopped there. With the conversation in the set, the per-call breakdown
-flipped the verdict:
-
-| chrF per call | lecture | conversation |
-|---|---|---|
-| Opus-MT (the student-to-be) | 60.3 | 51.6 |
-| MADLAD-400-3B-MT | 62.3 (+2.0) | 55.1 (+3.5) |
-
-On a clean monologue the small model is already close; conversational meeting speech — the
-domain the product lives in — is where it suffers and where the teacher clears the margin.
-MADLAD was chosen; neither candidate copied a source or inflated an output
-([report](results/2026-10-19-totti-baseline-en-it.md)).
-
-### Distillation data
-
-The teacher translated English meeting speech from the **AMI and ICSI** transcripts (text only,
-CC BY 4.0, verified by hand on the archives themselves): 141,155 raw segments, 77,088 sentences
-after the filters (4–60 words, exact duplicates dropped), with the verbatim feel — fillers,
-truncations, restarts — kept on purpose, because that is what the student will see. The split
-is by meeting series, so no speaker is in both train and dev, and overlap with the test set is
-impossible by construction: its pairs come from the author's own recordings. Declared filters
-on the teacher's output (length ratio outside [0.4, 1.6], source left untranslated) dropped
-1,362 pairs, keeping 75,726.
-
-A **50-pair random sample was reviewed by hand** before any training: 39 approved, 6 corrected,
-5 rejected. The review paid for itself twice. It caught an encoding artifact — the teacher
-writes `&apos;` for every Italian apostrophe — which was unescaped rather than dropped, saving
-5,242 good pairs. And it put a number on the failure no automatic filter catches without a
-reference: a garbled ASR source that the teacher "repairs" into fluent, invented Italian — the
-90% sample pass is the measure that the rate is tolerable for training. One inherited trait is
-declared rather than fixed: the teacher drops fillers, so the student learns subtitle-style
-output, not verbatim-preserving translation — an invented "so, uh, we we move the pots inside
-before the frost" becomes "quindi spostiamo i vasi dentro prima del gelo", filler and
-repetition gone. Acceptable for a layer whose output is subtitles, never the transcript. Final
-set: 72,522 train / 3,199 dev pairs
-([report](results/2026-10-19-totti-distillation-data.md)).
-
-### Why the full fine-tunes failed, and what shipped
-
-The guardrail was fixed before training: the student must beat the base on the domain set
-**and** stay above a floor on FLORES (56.6). Two full fine-tunes (on a rented GPU, about thirty
-cents in all; training never runs on the Mac) both failed it:
-
-| run | learning rate | training | FLORES |
-|---|---|---|---|
-| 1 | 5e-5 | 3 epochs | 57.7 → 54.9 |
-| 2 | 2e-5 | ~8 epochs (early stop) | 57.7 → 51.3 |
-
-The lesson: **forgetting tracks the total amount of training, not the learning rate** — the
-gentler second run trained longer and drifted further. The fully trained student also scored
-worse than the base on the hand-made set (55.1 against 56.1): past a point, the gain on the dev
-set is imitation of the teacher's phrasing, not quality.
-
-What shipped first (v0) is a **weight interpolation** between the base and the trained student,
-θ(α) = α·student + (1−α)·base, each point converted to int8 and scored with the same harness:
-
-| model | FLORES | domain |
-|---|---|---|
-| base | 57.6 | 56.1 |
-| **α = 0.3** (v0) | **57.2** | **57.0** |
-| α = 0.5 | 56.0 | 56.6 |
-| α = 0.7 | 54.3 | 55.9 |
-| α = 1.0 (the full student) | 51.3 | 55.1 |
-
-α = 0.3 passes the gate: both calls improve (lecture 60.3 → 61.1, conversation 51.6 → 52.6) and
-FLORES stays above the floor. The gain is small but consistent: a paired bootstrap over
-segments has it ahead of the base in **1000 of 1000 resamples**
-([report](results/2026-10-20-totti-t4-student.md)). v0 was replaced by v1, below.
-
-### ToTTI v1: a human anchor, the model the app uses
-
-On the widened 406-pair set v0 still beat the base (+1.6 chrF, +6.3 on the GitLab meeting) but
-lost its edge on the council meeting (−0.3, within noise): formal register that the distilled
-data never covered. v1 keeps the same 78M architecture — the live engine's speed is the
-requirement — and changes the data: training restarts from the base on **97,522 pairs**, the
-72,522 distilled ones plus **15,000 Tatoeba and 10,000 Europarl** human translations as an
-anchor (26% human). The anchor did what it was added for: at α = 1 the FLORES drift fell from
-−6.3 to −0.4. Interpolated with the base and scored with the same harness:
-
-| model | all (406) | lecture | conversation | GitLab | council | FLORES |
-|---|---|---|---|---|---|---|
-| base | 52.2 | 60.3 | 51.6 | 40.4 | 52.0 | 57.6 |
-| v0 (α = 0.3) | 53.8 | 61.1 | 52.6 | 46.7 | 51.7 | 57.2 |
-| **v1, α = 0.5** (shipped) | **54.3** | 61.1 | 53.2 | 47.7 | **52.3** | **57.5** |
-| v1, α = 1.0 (the full student) | 53.6 | 60.1 | 52.9 | 48.1 | 50.3 | 56.1 |
-
-v1 at α = 0.5 is the model the app uses: **+2.1 chrF over the base** (CI [+1.1, +3.1], ahead
-in all 1,000 paired-bootstrap resamples; +7.3 on the GitLab meeting) and +0.5 over v0 (ahead
-in 98%), with the council slice recovered and FLORES within 0.1 of the base. It did **not**
-pass the gate fixed before training — 54.7, what Opus-MT tc-big (a larger 0.2B model of the
-same family) scores with no training at all — and the failure stays on record: v1 ships as a
-strict improvement on v0 at the same speed, not through the gate. The app loads v1, then v0,
-then the base, whichever is on disk ([report](results/2026-10-21-totti-v1-alpha-sweep.md)).
-
-Honestly sized: +2.1 chrF is a bit over half of the teacher's +3.6 on the same 406 pairs, every
-reference comes from one translator, and two of the four recordings are the author's own. More
-hand-translated calls sharpen both the test set and the next run of this table; Italian to
-English is the same loop in the other direction, not started.
+How it was built, every engine compared on the same meter, speed, live latency and what did
+not ship: [`TOTTI.md`](TOTTI.md).
 
 ## Limitations
 
@@ -534,7 +405,7 @@ English is the same loop in the other direction, not started.
   mixed Italian and English.
 - **Translation measured on four recordings.** The 406 reference pairs come from a lecture, a
   conversation and two public meetings, all translated by one person, and the shipped gain over
-  the base engine is +2.1 chrF.
+  the base engine is +2.1 chrF ([details](TOTTI.md#limits)).
   The references fix recognition errors that every system translates alike, so part of the
   measured gap is source noise. Italian to English does not exist yet.
 - **Device changes untried on real hardware.** The conversion and the silence filling are

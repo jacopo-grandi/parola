@@ -10,7 +10,8 @@ the model may have got wrong are marked for review, so the transcript can be mad
 ([the numbers](#for-engineers)). A clean layer will be derived from the faithful one, never the
 other way around.
 
-How it is measured, which models it uses and why: [`METHODOLOGY.md`](METHODOLOGY.md).
+How it is measured, which models it uses and why: [`METHODOLOGY.md`](METHODOLOGY.md); the
+translation into Italian has its own page, with every engine compared: [`TOTTI.md`](TOTTI.md).
 
 Status: in development; the native Mac app works.
 
@@ -38,7 +39,7 @@ Status: in development; the native Mac app works.
   CPU, at the speed of the model it started from, and never changes the verbatim transcript.
   The ToTTI weights are not published; without them the same buttons work on plain Opus-MT,
   converted once by hand ([how](#reading-the-transcripts)). How it was trained and measured:
-  [`METHODOLOGY.md`](METHODOLOGY.md#translation-into-italian-totti).
+  [`TOTTI.md`](TOTTI.md).
 
 ## What it looks like
 
@@ -203,7 +204,7 @@ Opus-MT: convert Helsinki-NLP/opus-mt-en-it (Apache-2.0 on its model card, CC-BY
 OPUS-MT repository) to CTranslate2 int8 into `data/models/opus-mt-en-it-ct2` with
 `training/totti/convert.sh`, in a separate environment with `ctranslate2` and `transformers`.
 With neither on disk, the toggles stay hidden. How the engine was chosen, trained and measured
-is in [METHODOLOGY.md](METHODOLOGY.md#translation-into-italian-totti).
+is in [TOTTI.md](TOTTI.md).
 
 ### Writing reference transcripts
 
