@@ -1,0 +1,42 @@
+# ToTTI T4: fine-tune of Opus-MT en-it on the distilled pairs (decision 0038, plan T4).
+# Every number the training run depends on lives here; train.py takes no other knobs.
+
+model: Helsinki-NLP/opus-mt-en-it
+seed: 42
+
+data:
+  train: data/clean-train.jsonl   # 72,522 pairs, fields: en, it
+  dev: data/clean-dev.jsonl       # 3,199 pairs, early-stopping set
+  flores_src: data/eng_Latn.devtest   # FLORES-200 devtest, 1,012 sentences
+  flores_ref: data/ita_Latn.devtest
+
+tokenizer:
+  max_source_length: 256
+  max_target_length: 256
+
+training:
+  epochs: 10                # a ceiling; early stopping decides the real number
+  batch_size: 64
+  # Run 1 (2026-10-19, 5.0e-5): dev chrF 76.6 but FLORES 57.7 → 54.9, guardrail FAIL —
+  # catastrophic forgetting from the full-rate fine-tune. Run 2 halves-and-halves the rate.
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  fp16: true
+  early_stopping_patience: 2   # epochs without dev chrF improvement before stopping
+
+eval:
+  num_beams: 2              # the beam the app uses at home (translator.py)
+
+# The guardrail, fixed before training (plan T4). The run is ACCEPTED only if, at home with
+# the same CT2 int8 harness, the student beats the base Opus-MT on the domain set AND FLORES
+# stays within the margin. The domain gate re-scores the base model live on today's set (the
+# private set grows as calls are translated: 157 pairs scored 60.3, today's 224 score 56.1),
+# so the numbers below are the recorded T1 reference, not the gate itself. The notebook
+# prints a provisional verdict with its own fp16 measurements; the home numbers
+# (score_at_home.py) are the ones that count.
+guardrail:
+  domain_baseline_chrf: 60.3    # recorded T1 reference (157-pair lecture-only set)
+  flores_baseline_chrf: 57.6    # opus-mt-en-it CT2 int8 on FLORES-200 devtest (T1)
+  flores_margin: 1.0            # allowed FLORES regression

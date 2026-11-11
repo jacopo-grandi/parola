@@ -1,0 +1,50 @@
+# ToTTI v1: the small student improved (the shipped alpha-0.3 model is v0) (Jacopo, 2026-10-20: "la velocità è veramente
+# importante... si può migliorare ancora quel modello"). Architecture unchanged by
+# construction: Opus-MT 78M, the live engine's speed is the requirement.
+
+# Recipe decision (documented, 2026-10-20): training RESTARTS from the factory base with
+# the richer mix, rather than continuing from the alpha-0.3 checkpoint — reproducible from
+# public weights plus data, no stacked drift from two fine-tune rounds; T4 showed the data,
+# not the init, is what moves the result. Architecture and speed unchanged by construction.
+model: Helsinki-NLP/opus-mt-en-it
+seed: 42
+
+data:
+  train: data/clean-train-v1.jsonl   # 97,522 pairs: 72,522 distilled (teacher 3B) +
+                                     # 15,000 Tatoeba (CC BY 2.0 FR) + 10,000 Europarl
+                                     # (statmt: "not aware of any copyright restrictions")
+                                     # + 6 human review corrections; seeded, no test overlap
+  dev: data/clean-dev.jsonl
+  flores_src: data/eng_Latn.devtest
+  flores_ref: data/ita_Latn.devtest
+
+tokenizer:
+  max_source_length: 256
+  max_target_length: 256
+
+training:
+  epochs: 6                 # tighter ceiling than T4: drift grows with total training
+  batch_size: 64
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  fp16: true
+  early_stopping_patience: 2
+
+eval:
+  num_beams: 2
+
+# THE GATE, pre-registered 2026-10-20 before the run (set at 406 pairs, home CT2 int8):
+#   1. domain chrF >= 54.7 — tc-big's zero-shot score, the honest baseline found tonight:
+#      the small model must beat what a 3x bigger model does for free, or it does not ship;
+#   2. FLORES-200 devtest within 1.0 of the live small base;
+#   3. architecture and speed unchanged (opus-mt 78M) by construction.
+# The alpha-sweep at home may explore higher alphas than T4's 0.3: the human anchor in the
+# mix is expected to fight the drift that forced 0.3 last time. Teacher n-best/sampled data
+# considered and SKIPPED this run: it needs hours of regeneration for uncertain gain; it is
+# the next lever if this run falls short.
+guardrail:
+  domain_baseline_chrf: 54.7    # tc-big zero-shot on the 406 set (2026-10-20)
+  flores_baseline_chrf: 57.6
+  flores_margin: 1.0

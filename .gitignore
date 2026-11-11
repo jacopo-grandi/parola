@@ -67,5 +67,6 @@ docs/decisions/
 # Local agent tooling: launch config and third-party skills, not part of the product
 .claude/
 
-# T4 upload bundle: generated from committed files, never committed itself
-training/totti/totti-t4-bundle.zip
+# Colab upload bundles: generated from committed files and the distilled data, never committed
+training/totti/*-bundle.zip
+training/totti/*-bundle/

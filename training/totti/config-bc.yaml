@@ -1,0 +1,46 @@
+# ToTTI B+C: fine-tune of opus-mt-tc-big-en-it (0.2B, CC BY 4.0) on the distilled pairs plus
+# a human anchor (quality plan moves B+C; gate cleared 2026-10-20 at +3.6 teacher margin).
+# Every number the run depends on lives here; train.py takes no other knobs.
+
+model: Helsinki-NLP/opus-mt-tc-big-en-it
+seed: 42
+
+data:
+  train: data/clean-train-bc.jsonl   # 87,522 pairs: 72,522 distilled + 15,000 Tatoeba
+                                     # (human anchor, CC BY 2.0 FR, seeded sample, no overlap
+                                     # with the test set)
+  dev: data/clean-dev.jsonl          # 3,199 distilled pairs, early-stopping set
+  flores_src: data/eng_Latn.devtest
+  flores_ref: data/ita_Latn.devtest
+
+tokenizer:
+  max_source_length: 256
+  max_target_length: 256
+
+training:
+  epochs: 8                 # a ceiling; early stopping decides (T4 lesson: drift grows with
+                            # total training, so the ceiling is tighter than T4's 10)
+  batch_size: 32            # 0.2B fp16 on a T4: half T4's batch, same tokens per step order
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  fp16: true
+  early_stopping_patience: 2
+
+eval:
+  num_beams: 2
+
+# THE GATE, pre-registered before this run (2026-10-20, set at 406 pairs):
+# ACCEPTED only if, at home with the CT2 int8 harness (alpha-sweep against tc-big's own base
+# allowed, as in T4):
+#   1. domain chrF on the 406-pair private set >= live base Opus-MT + 3.0
+#      (base scored 52.2 on 2026-10-20 -> target ~55.2; the incumbent alpha-0.3 student
+#      scores 53.8 and must also be beaten, or the incumbent stays);
+#   2. FLORES-200 devtest chrF within 1.0 of the live base (floor ~56.6).
+guardrail:
+  domain_baseline_chrf: 52.2    # live base on the 406 set, 2026-10-20
+  domain_margin_required: 3.0
+  incumbent_chrf: 53.8          # the shipped alpha-0.3 student on the same set
+  flores_baseline_chrf: 57.6
+  flores_margin: 1.0
