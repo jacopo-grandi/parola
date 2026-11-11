@@ -79,7 +79,11 @@ On an Apple Silicon Mac with macOS 14.2 or later:
    the network.
 4. **Record.** Press **Registra** in the window or in the menu bar. The first time, macOS asks
    for the microphone and for system audio: allow both. A small floating recorder stays on top
-   of your call; stop it and the transcript appears in the list.
+   of your call; stop it and the transcript appears in the list. When another app starts using
+   the microphone (Meet in the browser, Zoom, FaceTime…), P.A.R.O.L.A. asks whether to record
+   that call, and when the app lets the microphone go it asks whether the call is over. It never
+   starts recording without a click; switch it off from the menu bar with **Proponi di
+   registrare le call**.
 
 Or let a coding agent do step 1: paste this into Claude Code, Codex or a similar agent on your
 Mac:

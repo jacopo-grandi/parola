@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct PAROLAApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var engine = Engine()
+    // Noticing calls (decision 0056): who holds the microphone, and what to ask about it.
+    @StateObject private var detector = CallDetector()
+    @StateObject private var offer = CallOffer()
 
     var body: some Scene {
         Window("P.A.R.O.L.A.", id: "main") {
@@ -62,15 +65,19 @@ struct PAROLAApp: App {
                 .onAppear {
                     delegate.engine = engine
                     if delegate.recorder == nil {
-                        delegate.recorder = FloatingRecorder(engine: engine)
+                        delegate.recorder = FloatingRecorder(engine: engine, offer: offer)
                     }
+                    offer.attach(engine: engine, detector: detector)
                     engine.start()
                 }
         }
         .defaultSize(width: 1200, height: 800)
 
         MenuBarExtra {
-            MenuContent().environmentObject(engine)
+            MenuContent()
+                .environmentObject(engine)
+                .environmentObject(detector)
+                .environmentObject(offer)
         } label: {
             Image(systemName: engine.recordingState == "recording" ? "record.circle.fill" : "waveform")
         }
@@ -113,6 +120,8 @@ struct MainView: View {
 
 struct MenuContent: View {
     @EnvironmentObject var engine: Engine
+    @EnvironmentObject var detector: CallDetector
+    @EnvironmentObject var offer: CallOffer
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -124,11 +133,26 @@ struct MenuContent: View {
             Text("Trascrizione in corso…")
         default:
             if engine.modelsReady {
-                Button("Registra una call") { engine.record("start") }
-                    .disabled(engine.url == nil)
+                // During a call, the call by name (decision 0056): "Registra la call su Zoom".
+                if detector.call != nil, let call = offer.currentCall {
+                    Button("Registra la c" + call.title.dropFirst()) { offer.recordCurrentCall() }
+                        .disabled(engine.url == nil)
+                } else {
+                    Button("Registra una call") { engine.record("start") }
+                        .disabled(engine.url == nil)
+                }
             } else {
                 // The first download is asked in the window, with its size and progress.
                 Button("Scarica i modelli…") { open() }
+            }
+        }
+        Divider()
+        Toggle("Proponi di registrare le call", isOn: $offer.enabled)
+        if !detector.ignored.isEmpty {
+            Menu("Non chiedere per") {
+                ForEach(detector.ignored.sorted { $0.value < $1.value }, id: \.key) { bundle, name in
+                    Button("\(name): chiedi di nuovo") { detector.unignore(bundle) }
+                }
             }
         }
         Divider()
