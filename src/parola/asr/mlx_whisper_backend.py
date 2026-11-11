@@ -322,6 +322,34 @@ class MLXWhisperBackend:
 
         return hand_over
 
+    def warm(self) -> None:
+        """Run the model once on a sliver of noise before the first audio arrives.
+
+        The live loop's first decode otherwise pays the model load AND the Metal kernel
+        compilation inside the tick (~1.7 s of 2.5 measured): loading the weights alone is
+        not enough, MLX compiles the kernels on the first forward pass, so the warm-up is a
+        real (tiny) transcription, done while the first seconds are still being captured.
+        """
+        import tempfile
+        import wave
+
+        import mlx_whisper
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        noise = (rng.standard_normal(8000) * 300).astype("<i2")  # 0.5 s, quiet
+        with tempfile.TemporaryDirectory(prefix="parola-warm-") as tmp:
+            wav = Path(tmp) / "warm.wav"
+            with wave.open(str(wav), "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(16_000)
+                f.writeframes(noise.tobytes())
+            # Straight to mlx_whisper: the backend's own path would VAD-skip pure noise.
+            # word_timestamps matches the real path, so the alignment kernels compile too.
+            mlx_whisper.transcribe(str(wav), path_or_hf_repo=self.model, language="en",
+                                   word_timestamps=True)  # fmt: skip
+
     def transcribe(self, wav_path: Path, language: str | None = None) -> ASRResult:
         with carried_prompt(self.glossary):
             return self._transcribe(wav_path, language)

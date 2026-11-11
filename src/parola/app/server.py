@@ -14,6 +14,7 @@ import json
 import re
 import shutil
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from parola import editing
+from parola.asr import release_models
 from parola.audio import channel_file
 from parola.audio.loudness import channel_loudness
 from parola.audio.playback import forget, playable
@@ -183,16 +185,35 @@ def to_markdown(t: Transcript, name: str) -> str:
 
 
 def create_app(folder: Path, session: RecordingSession | None = None,
-               models: ModelDownload | None = None) -> FastAPI:  # fmt: skip
+               models: ModelDownload | None = None, listener=None,
+               live_backend=None) -> FastAPI:  # fmt: skip
+    """``listener`` and ``live_backend`` (the Whisper of the live subtitles) are for the tests."""
     from contextlib import asynccontextmanager
+
+    from parola.totti.listen import Listener
 
     session = session or RecordingSession(folder)
     models = models or ModelDownload()
+    # Live subtitles without a recording (decision 0042): the system audio kept in memory.
+    listener = listener or Listener()
+    # Visible versioning (decision 0045): the engine says which commit it booted from, and
+    # the status poll says when the repo has moved on (a process older than the code on
+    # disk cost wasted diagnoses; now every surface declares itself).
+    from parola.buildinfo import BuildInfo
+    from parola.totti.translator import REPO_ROOT
+
+    build = BuildInfo(REPO_ROOT)
+    print(f"PAROLA engine at commit {build.booted or 'unknown'}", flush=True)
+    # "on": the person wants subtitles, while a recording or the listening lasts. The server
+    # holds it, so the web bar and the native floater cannot disagree. "lang" likewise: "it"
+    # (translated, committed lines only) or "en" (the original, with the provisional tail).
+    subtitles: dict = {"loop": None, "on": False, "lang": "it"}
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         session.abort()  # never leave the capture helper running
+        listener.stop()
 
     app = FastAPI(
         title="parola", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
@@ -216,7 +237,15 @@ def create_app(folder: Path, session: RecordingSession | None = None,
     @app.get("/api/record/status")
     def record_status() -> dict:
         # The models' state too: the menu bar of the native app reads only this.
-        return {**session.status(), "models": models.status()["state"]}
+        st = {**session.status(), "models": models.status()["state"],
+              "build": build.status()}  # fmt: skip
+        listening = listener.active
+        if listening and st["state"] != "recording":
+            st["levels"] = listener.levels
+        st["listening"] = listening
+        st["listen_error"] = listener.error
+        st["subtitles"] = subtitles["on"] and (st["state"] == "recording" or listening)
+        return st
 
     @app.get("/api/outputs")
     def audio_outputs() -> list[dict]:
@@ -244,10 +273,22 @@ def create_app(folder: Path, session: RecordingSession | None = None,
     def record_start(req: RecordRequest) -> dict:
         require_models()
         lang = req.lang if req.lang in ("it", "en") else None
+        # From listening to recording (decision 0042): the recording starts now, nothing heard
+        # before goes into it, and the subtitles carry on on the new system wav.
+        was_listening = listener.active
+        old = subtitles["loop"]
+        if was_listening:
+            stop_listening(release=False)
         try:
-            return session.start(req.name or None, lang, req.mic, req.system)
+            session.start(req.name or None, lang, req.mic, req.system)
         except SessionError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        subtitles["on"] = was_listening
+        if was_listening:
+            name = session.status()["name"]
+            start_loop(folder / f"{name}.system.wav",
+                       lambda: session.status()["state"] == "recording", after=old)  # fmt: skip
+        return record_status()
 
     @app.post("/api/record/{action}")
     def record_control(action: str) -> dict:
@@ -255,9 +296,154 @@ def create_app(folder: Path, session: RecordingSession | None = None,
         if action not in controls:
             raise HTTPException(status_code=404, detail="no such action")
         try:
-            return controls[action]()
+            controls[action]()
+            return record_status()
         except SessionError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+
+    # ------------------------------------------------ ToTTI: live subtitles (decision 0038)
+
+    from parola.totti import DocumentTranslation, SubtitleLoop, Translator
+
+    translator = Translator()  # the student (or the base): the only live engine
+
+    def start_loop(source, running, after: SubtitleLoop | None = None) -> SubtitleLoop:
+        """A subtitle loop on ``source``; it starts once ``after`` (the loop it replaces) has
+        finished its last tick, so two never run Whisper at the same time."""
+        if live_backend is not None:
+            backend = live_backend()
+        else:
+            from parola.asr import MLXWhisperBackend
+
+            backend = MLXWhisperBackend(vad=True)
+        loop = SubtitleLoop(source, translator, backend, running=running,
+                            lang=subtitles["lang"])  # fmt: skip
+        if after is not None:
+            loop.revision = after.revision + 1  # the clients redraw on a revision change
+        subtitles["loop"] = loop
+
+        def go() -> None:
+            if after is not None:
+                after.stop()
+                after.join(10)
+            loop.start()
+
+        if after is None:
+            go()
+        else:
+            threading.Thread(target=go, daemon=True).start()
+        return loop
+
+    def stop_listening(release: bool) -> None:
+        loop = subtitles["loop"]
+        listener.stop()  # the loop sees it and ends by itself
+        subtitles["on"] = False
+        if loop is None:
+            return
+        loop.stop()
+        if release:
+            # The speech models have no reason to stay in memory (decision 0027), once the
+            # loop's last tick is over and if nothing else came to use them meanwhile.
+            def free() -> None:
+                loop.join(10)
+                busy = session.status()["state"] in ("recording", "transcribing")
+                if not busy and not listener.active:
+                    release_models()
+
+            threading.Thread(target=free, daemon=True).start()
+
+    # ToTTI v1 is the only user-facing translation engine (decision 0044): the teacher
+    # stays on disk for distillation only, never behind an endpoint. Translations cached
+    # under other engines' folders in .translations/ are simply never read again.
+    translations = DocumentTranslation(folder, translator)
+
+    @app.get("/api/recordings/{name}/translation")
+    def translation_status(name: str) -> dict:
+        # "available" says whether the translation model is on disk, like /api/subtitles.
+        status = translations.status(_check(name), translator)
+        status.setdefault("engine", translator.name)
+        return {"available": translator.available(), **status}
+
+    @app.post("/api/recordings/{name}/translate")
+    def translation_start(name: str) -> dict:
+        if not translator.available():
+            raise HTTPException(status_code=409, detail="translation model not on disk")
+        if not (folder / f"{_check(name)}.json").exists():
+            raise HTTPException(status_code=404, detail="no such recording")
+        try:
+            status = translations.start(name, translator)
+            status.setdefault("engine", translator.name)
+            return {"available": True, **status}
+        except RuntimeError as e:  # another call is being translated right now
+            raise HTTPException(status_code=409, detail=str(e)) from e
+
+    @app.get("/api/subtitles")
+    def subtitles_status() -> dict:
+        loop = subtitles["loop"]
+        state = loop.status() if loop else {"active": False, "lines": [], "tail": "",
+                                            "lang": subtitles["lang"], "revision": 0,
+                                            "error": ""}  # fmt: skip
+        # "available" says whether the translation model is on disk: the UI hides the
+        # toggle without it.
+        return {"available": translator.available(), **state}
+
+    @app.post("/api/subtitles/lang/{lang}")
+    def subtitles_lang(lang: str) -> dict:
+        """The strip's language: "it" (translated) or "en" (original, with the live tail)."""
+        if lang not in ("it", "en"):
+            raise HTTPException(status_code=404, detail="no such language")
+        subtitles["lang"] = lang
+        if subtitles["loop"] is not None:
+            subtitles["loop"].lang = lang
+        return subtitles_status()
+
+    @app.post("/api/subtitles/start")
+    def subtitles_start() -> dict:
+        if session.status()["state"] != "recording":
+            raise HTTPException(status_code=409, detail="not recording")
+        if not translator.available():
+            raise HTTPException(status_code=409, detail="translation model not on disk")
+        require_models()
+        loop = subtitles["loop"]
+        if loop is None or not loop.active:
+            name = session.status()["name"]
+            start_loop(folder / f"{name}.system.wav",
+                       lambda: session.status()["state"] == "recording")  # fmt: skip
+        subtitles["on"] = True
+        return subtitles_status()
+
+    @app.post("/api/subtitles/stop")
+    def subtitles_stop() -> dict:
+        subtitles["on"] = False
+        if subtitles["loop"] is not None:
+            subtitles["loop"].stop()
+        return subtitles_status()
+
+    @app.post("/api/listen/start")
+    def listen_start() -> dict:
+        """Subtitles without recording (decision 0042): the system audio, kept in memory."""
+        if not translator.available():
+            raise HTTPException(status_code=409, detail="translation model not on disk")
+        require_models()
+        state = session.status()["state"]
+        if state in ("recording", "transcribing"):
+            raise HTTPException(status_code=409, detail=f"already {state}")
+        if not listener.active:
+            try:
+                listener.start()
+            except RuntimeError as e:  # the helper could not be built
+                raise HTTPException(status_code=409, detail=str(e)) from e
+        loop = subtitles["loop"]
+        if loop is None or not loop.active:
+            start_loop(listener.tail, lambda: listener.active)
+        subtitles["on"] = True
+        return record_status()
+
+    @app.post("/api/listen/stop")
+    def listen_stop() -> dict:
+        if listener.active:
+            stop_listening(release=True)
+        return record_status()
 
     @app.post("/api/import")
     async def import_file(request: Request, filename: str, lang: str | None = None,
@@ -269,6 +455,8 @@ def create_app(folder: Path, session: RecordingSession | None = None,
         require_models()
         if session.status()["state"] in ("recording", "transcribing"):
             raise HTTPException(status_code=409, detail=f"already {session.status()['state']}")
+        if listener.active:  # two Whisper at once would fight for the GPU (decision 0042)
+            raise HTTPException(status_code=409, detail="already listening")
         uploads = folder / ".uploads"
         uploads.mkdir(parents=True, exist_ok=True)
         tmp = uploads / f"{datetime.now():%Y%m%d-%H%M%S-%f}{ext}"

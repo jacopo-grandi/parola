@@ -112,6 +112,27 @@ def build_parser() -> argparse.ArgumentParser:
     ti = sub.add_parser("titles", help="suggested titles next to the ones you chose")
     ti.add_argument("--dir", type=Path, default=Path("data/private/calls"))
 
+    to = sub.add_parser("totti", help="EN→IT translation: test set draft and import")
+    tosub = to.add_subparsers(dest="action", required=True)
+    tod = tosub.add_parser("draft", help="English sentences from the calls, to translate by hand")
+    tod.add_argument("--dir", type=Path, default=Path("data/private/calls"))
+    tod.add_argument("-o", "--out", type=Path, default=Path("data/private/totti/test-en-it.txt"))
+    tod.add_argument("--limit", type=int, default=300)
+    tod.add_argument("--force", action="store_true", help="overwrite an existing file")
+    toi = tosub.add_parser("import", help="convert the filled draft into the frozen test set")
+    toi.add_argument("file", type=Path, help="the draft with every IT: line filled")
+    toi.add_argument("-o", "--out", type=Path, default=None, help="default: <name>.jsonl")
+    tor = tosub.add_parser("review", help="translate new test-set sentences with the audio at hand")
+    tor.add_argument("--dir", type=Path, default=Path("data/private/calls"))
+    tor.add_argument("--frozen", type=Path, default=Path("data/private/totti/test-en-it.jsonl"))
+    tor.add_argument("--out", type=Path, default=Path("data/private/totti/review-additions.jsonl"))
+    tor.add_argument("--port", type=int, default=8798)
+    tot = tosub.add_parser("distill", help="teacher pass over the source sentences (resumable)")
+    tot.add_argument("--sources", type=Path, default=Path("data/totti-train/source-en.jsonl"))
+    tot.add_argument("--out", type=Path, default=Path("data/totti-train/distilled-madlad.jsonl"))
+    tot.add_argument("--model", type=Path, default=Path("data/models/madlad400-3b-mt-ct2"))
+    tot.add_argument("--threads", type=int, default=8)
+
     v = sub.add_parser("validate", help="check a reference transcript against the conventions")
     v.add_argument("file", type=Path)
 
@@ -627,6 +648,72 @@ def _models_for(args) -> list[str]:
     return []
 
 
+def cmd_totti_draft(args) -> int:
+    from parola.totti.evalset import pick, to_draft
+
+    if args.out.exists() and not args.force:
+        print(f"error: {args.out} exists (use --force to overwrite)", file=sys.stderr)
+        return 1
+    pairs = pick(args.dir, limit=args.limit)
+    if not pairs:
+        print(f"error: no English sentences found in {args.dir}", file=sys.stderr)
+        return 1
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(to_draft(pairs), encoding="utf-8")
+    print(f"wrote {args.out} ({len(pairs)} sentences from {len({p.call for p in pairs})} calls)")
+    return 0
+
+
+def cmd_totti_import(args) -> int:
+    from parola.totti.evalset import EvalSetError, from_draft, save
+
+    try:
+        pairs = from_draft(args.file.read_text(encoding="utf-8"))
+    except EvalSetError as e:
+        print(f"error: {args.file}: {e}", file=sys.stderr)
+        return 1
+    out = save(pairs, args.out or args.file.with_suffix(".jsonl"))
+    print(f"wrote {out} ({len(pairs)} pairs)")
+    return 0
+
+
+def cmd_totti_review(args) -> int:
+    import uvicorn
+
+    from parola.totti.review import create_review_app, pending
+
+    n = len(pending(args.dir, args.frozen))
+    print(f"{n} candidate sentences · http://127.0.0.1:{args.port} · Ctrl-C per chiudere",
+          file=sys.stderr)  # fmt: skip
+    app = create_review_app(args.dir, args.frozen, args.out)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
+
+
+def cmd_totti_distill(args) -> int:
+    import ctranslate2
+    import sentencepiece
+
+    from parola.totti.distill import translate_sources
+
+    sp = sentencepiece.SentencePieceProcessor(str(args.model / "spiece.model"))
+    translator = ctranslate2.Translator(str(args.model), device="cpu", inter_threads=1,
+                                        intra_threads=args.threads)  # fmt: skip
+
+    def translate(texts: list[str]) -> list[str]:
+        tokens = [[*sp.encode(f"<2it> {t}", out_type=str), "</s>"] for t in texts]
+        res = translator.translate_batch(tokens, beam_size=2, max_batch_size=32,
+                                         max_decoding_length=256)  # fmt: skip
+        return [sp.decode(r.hypotheses[0]) for r in res]
+
+    def progress(done: int, total: int) -> None:
+        print(f"\rtranslated {done}/{total}", end="", file=sys.stderr)
+
+    n = translate_sources(args.sources, args.out, translate, progress=progress)
+    print(f"\n{n} new pairs in {args.out}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if repos := _models_for(args):
@@ -645,6 +732,10 @@ def main(argv: list[str] | None = None) -> int:
         ("validate", None): cmd_validate,
         ("annotate", "draft"): cmd_annotate_draft,
         ("annotate", "import"): cmd_annotate_import,
+        ("totti", "draft"): cmd_totti_draft,
+        ("totti", "import"): cmd_totti_import,
+        ("totti", "distill"): cmd_totti_distill,
+        ("totti", "review"): cmd_totti_review,
         ("manifest", "check"): cmd_manifest_check,
         ("eval", None): cmd_eval,
         ("audit", "build"): cmd_audit_build,

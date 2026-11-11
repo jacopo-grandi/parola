@@ -2,12 +2,15 @@
 //
 //   parola-capture --out-dir DIR --name NAME [--duration SECONDS] [--no-mic] [--no-system]
 //                [--levels]
+//   parola-capture --stream [--levels]
 //
 // Writes DIR/NAME.mic.wav (microphone), DIR/NAME.system.wav (system audio, through a Core Audio
 // process tap: no virtual driver needed, the audio keeps playing) and DIR/NAME.capture.json.
 // Stops after --duration, or on SIGINT / SIGTERM. Requires macOS 14.2+ (decision 0013).
 // SIGUSR1 pauses and SIGUSR2 resumes: while paused nothing is written to either track, so the
 // two files stay aligned with each other (the pause is cut out of both).
+// With --stream, nothing is written to disk: the system audio alone, as 16 kHz mono 16-bit PCM,
+// goes to stdout until SIGINT (live subtitles without a recording, decision 0042).
 // With --levels, prints the peak level of each track (dBFS) to stderr four times a second:
 //   LEVELS {"mic": -31.2, "system": -12.5}
 // Audio devices may change during a call: headphones plugged in or taken off, AirPods that drop
@@ -24,6 +27,8 @@ import Foundation
 // The pause signals would terminate the process before their handlers are installed.
 signal(SIGUSR1, SIG_IGN)
 signal(SIGUSR2, SIG_IGN)
+// A reader that goes away (--stream) makes write() fail instead of killing the process.
+signal(SIGPIPE, SIG_IGN)
 
 // MARK: - Helpers
 
@@ -154,6 +159,7 @@ struct Options {
     var mic = true
     var system = true
     var levels = false
+    var stream = false
 }
 
 func parseOptions() -> Options {
@@ -173,13 +179,16 @@ func parseOptions() -> Options {
         case "--no-mic": o.mic = false
         case "--no-system": o.system = false
         case "--levels": o.levels = true
+        case "--stream": o.stream = true
         case "-h", "--help":
             print("usage: parola-capture --out-dir DIR --name NAME [--duration S] [--no-mic] [--no-system] [--levels]")
+            print("       parola-capture --stream [--levels]")
             print("       parola-capture --outputs | --set-output UID")
             exit(0)
         default: fail("unknown argument \(arg)")
         }
     }
+    if o.stream { o.mic = false; o.system = true }  // listening: what the Mac plays, nothing else
     if !o.mic && !o.system { fail("nothing to record") }
     return o
 }
@@ -228,6 +237,7 @@ func event(_ side: String, _ what: String) {
 
 final class Track {
     private var file: AVAudioFile?  // nil once closed
+    private var stream = false  // stdout instead of a file (--stream)
     let format: AVAudioFormat  // the file's, fixed when the recording starts
     var frames: Int64 = 0
     // Peak absolute sample since the last LEVELS line (read and reset on the main queue).
@@ -240,6 +250,13 @@ final class Track {
         file = try AVAudioFile(
             forWriting: url, settings: format.settings, commonFormat: format.commonFormat,
             interleaved: format.isInterleaved)
+    }
+
+    /// The audio to stdout as 16 kHz mono 16-bit PCM, what Whisper reads (decision 0042).
+    init(streamTo _: FileHandle) {
+        format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1,
+                               interleaved: true)!
+        stream = true
     }
 
     func write(_ buffer: AVAudioPCMBuffer) {
@@ -269,6 +286,19 @@ final class Track {
     }
 
     private func append(_ buffer: AVAudioPCMBuffer) {
+        if stream {
+            guard let samples = buffer.int16ChannelData else { return }
+            var bytes = Int(buffer.frameLength) * MemoryLayout<Int16>.size
+            var p = UnsafeRawPointer(samples[0])
+            while bytes > 0 {
+                let n = Darwin.write(STDOUT_FILENO, p, bytes)
+                if n <= 0 { if errno == EINTR { continue }; stream = false; return }  // reader gone
+                bytes -= n
+                p += n
+            }
+            frames += Int64(buffer.frameLength)
+            return
+        }
         guard let file else { return }
         do {
             try file.write(from: buffer)
@@ -281,6 +311,7 @@ final class Track {
     private func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         if converter == nil || !converter!.inputFormat.isEqual(buffer.format) {
             converter = AVAudioConverter(from: buffer.format, to: format)
+            converter?.downmix = format.channelCount == 1  // both sides of the stereo tap
         }
         guard let converter else { return nil }
         let ratio = format.sampleRate / buffer.format.sampleRate
@@ -337,9 +368,10 @@ final class SystemCapture {
     private var lastRestart = Date.distantPast
     private var clockRate: Float64 = 0
 
-    func start(url: URL) throws {
+    /// Records into ``url``, or streams to stdout when it is nil (--stream).
+    func start(url: URL?) throws {
         let format = try create()
-        track = try Track(url: url, format: format)
+        track = try url.map { try Track(url: $0, format: format) } ?? Track(streamTo: .standardOutput)
         outputName = deviceName(defaultOutput())
         // A new default output (headphones in or out): restart only if the clock has to change.
         let system = AudioObjectID(kAudioObjectSystemObject)
@@ -602,7 +634,9 @@ func runDeviceCommand() {
 
 runDeviceCommand()
 let options = parseOptions()
-try? FileManager.default.createDirectory(at: options.outDir, withIntermediateDirectories: true)
+if !options.stream {
+    try? FileManager.default.createDirectory(at: options.outDir, withIntermediateDirectories: true)
+}
 let micURL = options.outDir.appendingPathComponent("\(options.name).mic.wav")
 let systemURL = options.outDir.appendingPathComponent("\(options.name).system.wav")
 let started = clock.start
@@ -610,7 +644,7 @@ let started = clock.start
 let mic = MicCapture()
 let system = SystemCapture()
 do {
-    if options.system { try system.start(url: systemURL) }
+    if options.system { try system.start(url: options.stream ? nil : systemURL) }
     if options.mic { try mic.start(url: micURL) }
 } catch {
     system.stop()
@@ -637,6 +671,7 @@ if options.levels {
 func finish() -> Never {
     if options.mic { mic.stop() }
     if options.system { system.stop() }
+    if options.stream { exit(0) }  // nothing on disk, nothing to sum up
     // A side whose device was changing when the call ended: silence up to the end, so both
     // files have the same length.
     let end = clock.now
