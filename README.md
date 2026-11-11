@@ -168,6 +168,16 @@ Enter saves the correction (unchanged text confirms it) and stays put — N move
 edits any word, Cmd-Z undoes. Every change is logged with the model's original text, which is also
 kept as `<name>.asr.json`. Export as txt, md, docx, json, or PDF through the browser's print.
 
+**English calls in Italian (experimental).** With an English→Italian model on disk, the **IT**
+toggle in a call shows the Italian translation under each English line, and the **CC** button
+on the floating recorder writes live Italian subtitles under it, during a recording or without
+recording anything. The translation is derived from the verbatim and never changes it. The app
+does not download this model: convert Helsinki-NLP/opus-mt-en-it (Apache-2.0 on its model
+card, CC-BY 4.0 in the OPUS-MT repository) to CTranslate2 int8 into
+`data/models/opus-mt-en-it-ct2` with `training/totti/convert.sh`, in a separate environment
+with `ctranslate2` and `transformers`. Until it is there, the toggles stay hidden. How the
+engine was chosen and measured is in [METHODOLOGY.md](METHODOLOGY.md#translation-into-italian-totti).
+
 ### Writing reference transcripts
 
 ```bash

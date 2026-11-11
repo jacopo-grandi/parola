@@ -12,7 +12,9 @@ WER 4.8% in Italian and 5.3% in English on adjudicated references), a second mod
 marks the words it does not confirm (66% of turbo's errors flagged by marking 12% of the words),
 and the person reviews only those. Every correction is logged next to what the model had
 written, and these logs become a personal glossary that suggests the next corrections. Titles
-come from TF-IDF key phrases scored against the language, without a language model. Calls are recorded on two channels, so "me" and "the others"
+come from TF-IDF key phrases scored against the language, without a language model. English
+calls can be read in Italian: an 87 MB local model translates each line, improved by distilling
+a larger teacher on meeting speech (chrF 56.1 to 57.0 on hand-translated references). Calls are recorded on two channels, so "me" and "the others"
 are never guessed; within a channel, voices are told apart by sherpa-onnx with our own spectral
 clustering (diarization error 30% on two AMI meetings). An hour of audio takes about 8 minutes on
 an M4 Pro, with a memory peak of about 6 GB. The test set is small (0.76 hours of adjudicated
@@ -257,6 +259,7 @@ there is no "Io / Altri" split and no echo removal; the voices are told apart as
 - **Clean version:** only removes material (fillers, repetitions, false starts) by explicit rules,
   never rewrites. A trained classifier is paused.
 - **Title:** see the next section.
+- **Italian translation:** see "Translation into Italian (ToTTI)".
 
 ## Titles from key phrases
 
@@ -365,6 +368,128 @@ titles equal or better. Word frequencies come from
 [wordfreq](https://github.com/rspeer/wordfreq) by Robyn Speer (code Apache-2.0, data
 CC BY-SA 4.0).
 
+## Translation into Italian (ToTTI)
+
+English calls can be followed in Italian. An "IT" toggle in the call view shows an Italian
+translation under each English line, and during a recording the same engine writes live
+subtitles. The translation is a derived layer like the clean version and the title: it is
+computed from the verbatim transcript, cached apart from it, and re-derived when the transcript
+changes, so a corrected word corrects its translation too. It never touches the verbatim — each
+Italian line sits under the English segment it comes from, with its timestamps — and the live
+subtitles are ephemeral: the full-quality transcription still runs at the end of the call as
+usual.
+
+The engine is Opus-MT en-it (Helsinki-NLP) converted to CTranslate2 int8: 87 MB, about 40 ms
+per sentence on the CPU, so Whisper keeps the GPU during a call. Larger models were rejected
+for this seat: MADLAD-400 3B translates better but weighs over 6 GB, a local LLM can invent
+text — the one thing subtitles must not do — and NLLB's licence is non-commercial.
+
+### Measured like the transcript
+
+- The test set is **224 EN→IT pairs from two of the author's English recordings** (a lecture and
+  a conversation, with the speakers' consent): the sources are verbatim ASR segments, the
+  references translated by hand. Like the audio, the pairs are never committed.
+- A design choice worth stating plainly: the source sentences are the transcripts P.A.R.O.L.A.
+  actually produces, residual ASR errors included, and the gold translates the transcript, not
+  the idealized speech (stretches with unresolved doubts are excluded from pairing). The meter
+  therefore measures translation of the production input — harder and more representative than
+  clean text — and by construction it does not reward fixing transcription errors from context;
+  judging that robustness would need a dedicated slice with gold translated from the audio.
+- The metrics are corpus **chrF** (primary: character level, so Italian morphology costs a
+  little, not a whole word) and **BLEU**, via sacrebleu, with two declared counters the scores
+  cannot see — subtitles must not invent: **copies** (sources left untranslated) and
+  **inflated** (translations over 1.6 times their source's length, which suggests added
+  content). Metrics and counters have hand-built unit tests, as the WER does.
+- **FLORES-200 devtest** (1,012 professionally translated EN→IT sentences, CC BY-SA 4.0) is
+  the general-domain regression guard: a model that gets better on calls by getting worse at
+  ordinary English is refused.
+
+The base engine scores chrF 56.1 on the domain set and 57.6 on FLORES, with no copies and no
+inflated output ([report](results/2026-10-19-totti-baseline-en-it.md)).
+
+### A teacher chosen by the numbers
+
+To improve the engine without making it heavier, the path is sequence-level distillation: a
+large, cleanly licensed teacher translates in-domain English, and those pairs fine-tune the
+small student. The bar was fixed before measuring: the teacher must beat the student by about
++3 chrF on the domain set, otherwise distillation is not worth the trouble.
+
+Two candidates, both Apache-2.0 (licences checked by hand on the model cards): MADLAD-400-3B-MT
+and Qwen3-4B-Instruct. On the lecture alone neither cleared the bar (the best gap was +2.0) and
+the work would have stopped there. With the conversation in the set, the per-call breakdown
+flipped the verdict:
+
+| chrF per call | lecture | conversation |
+|---|---|---|
+| Opus-MT (the student-to-be) | 60.3 | 51.6 |
+| MADLAD-400-3B-MT | 62.3 (+2.0) | 55.1 (+3.5) |
+
+On a clean monologue the small model is already close; conversational meeting speech — the
+domain the product lives in — is where it suffers and where the teacher clears the margin.
+MADLAD was chosen; neither candidate copied a source or inflated an output
+([report](results/2026-10-19-totti-baseline-en-it.md)).
+
+### Distillation data
+
+The teacher translated English meeting speech from the **AMI and ICSI** transcripts (text only,
+CC BY 4.0, verified by hand on the archives themselves): 141,155 raw segments, 77,088 sentences
+after the filters (4–60 words, exact duplicates dropped), with the verbatim feel — fillers,
+truncations, restarts — kept on purpose, because that is what the student will see. The split
+is by meeting series, so no speaker is in both train and dev, and overlap with the test set is
+impossible by construction: its pairs come from the author's own recordings. Declared filters
+on the teacher's output (length ratio outside [0.4, 1.6], source left untranslated) dropped
+1,362 pairs, keeping 75,726.
+
+A **50-pair random sample was reviewed by hand** before any training: 39 approved, 6 corrected,
+5 rejected. The review paid for itself twice. It caught an encoding artifact — the teacher
+writes `&apos;` for every Italian apostrophe — which was unescaped rather than dropped, saving
+5,242 good pairs. And it put a number on the failure no automatic filter catches without a
+reference: a garbled ASR source that the teacher "repairs" into fluent, invented Italian — the
+90% sample pass is the measure that the rate is tolerable for training. One inherited trait is
+declared rather than fixed: the teacher drops fillers, so the student learns subtitle-style
+output, not verbatim-preserving translation — an invented "so, uh, we we move the pots inside
+before the frost" becomes "quindi spostiamo i vasi dentro prima del gelo", filler and
+repetition gone. Acceptable for a layer whose output is subtitles, never the transcript. Final
+set: 72,522 train / 3,199 dev pairs
+([report](results/2026-10-19-totti-distillation-data.md)).
+
+### Why the full fine-tunes failed, and what shipped
+
+The guardrail was fixed before training: the student must beat the base on the domain set
+**and** stay above a floor on FLORES (56.6). Two full fine-tunes (on a rented GPU, about thirty
+cents in all; training never runs on the Mac) both failed it:
+
+| run | learning rate | training | FLORES |
+|---|---|---|---|
+| 1 | 5e-5 | 3 epochs | 57.7 → 54.9 |
+| 2 | 2e-5 | ~8 epochs (early stop) | 57.7 → 51.3 |
+
+The lesson: **forgetting tracks the total amount of training, not the learning rate** — the
+gentler second run trained longer and drifted further. The fully trained student also scored
+worse than the base on the hand-made set (55.1 against 56.1): past a point, the gain on the dev
+set is imitation of the teacher's phrasing, not quality.
+
+What shipped is a **weight interpolation** between the base and the trained student,
+θ(α) = α·student + (1−α)·base, each point converted to int8 and scored with the same harness:
+
+| model | FLORES | domain |
+|---|---|---|
+| base | 57.6 | 56.1 |
+| **α = 0.3** (shipped) | **57.2** | **57.0** |
+| α = 0.5 | 56.0 | 56.6 |
+| α = 0.7 | 54.3 | 55.9 |
+| α = 1.0 (the full student) | 51.3 | 55.1 |
+
+α = 0.3 passes the gate: both calls improve (lecture 60.3 → 61.1, conversation 51.6 → 52.6) and
+FLORES stays above the floor. The gain is small but consistent: a paired bootstrap over
+segments has it ahead of the base in **1000 of 1000 resamples**. The app prefers the
+interpolated weights when they are on disk and falls back to the base
+([report](results/2026-10-20-totti-t4-student.md)).
+
+Honestly sized: +0.9 chrF is about a third of the teacher's +2.7 on this set, and the test set
+is two calls. More hand-translated calls sharpen both the test set and the next run of this
+table; Italian to English is the same loop in the other direction, not started.
+
 ## Limitations
 
 - **A small test set.** The error rates come from 0.76 hours on two files, one per language;
@@ -380,6 +505,10 @@ CC BY-SA 4.0).
   On en-001, a lecture, the voices alternate as if there were two speakers; not checked yet.
 - **Language on four files.** The 5-window detection is checked on four recordings, none of them
   mixed Italian and English.
+- **Translation measured on two calls.** The 224 reference pairs come from one lecture and one
+  conversation, translated by one person, and the shipped gain over the base engine is +0.9 chrF.
+  The references fix recognition errors that every system translates alike, so part of the
+  measured gap is source noise. Italian to English does not exist yet.
 - **Device changes untried on real hardware.** The conversion and the silence filling are
   checked in a test (24 kHz mono audio into a 48 kHz stereo file: right pitch, level and
   length); the restarts themselves still have to be tried with AirPods during a real call.
@@ -398,6 +527,11 @@ CC BY-SA 4.0).
 | pyannote segmentation 3.0 (sherpa-onnx export) | who speaks | MIT | 6 MB |
 | WeSpeaker VoxCeleb ResNet34-LM | who speaks | CC BY 4.0 | 27 MB |
 | wordfreq | titles, glossary | Apache-2.0 (data CC BY-SA 4.0) | in the package |
+| Opus-MT en-it (CTranslate2 conversion, α=0.3 interpolation) | translation | Apache-2.0 (model card; CC BY 4.0 on the OPUS-MT repository) | 87 MB |
+| MADLAD-400-3B-MT (training only) | distillation teacher | Apache-2.0 | not bundled |
+| Qwen3-4B-Instruct (evaluation only) | teacher comparison | Apache-2.0 | not bundled |
+| AMI and ICSI transcripts (training only) | distillation sources | CC BY 4.0 | not bundled |
+| FLORES-200 devtest (evaluation only) | translation regression set | CC BY-SA 4.0 | not bundled |
 | CrisperWhisper 2.0 (optional, evaluation only) | comparison | non-commercial | not bundled |
 
 The models are downloaded once, when the person agrees in the app; the two voice models are
