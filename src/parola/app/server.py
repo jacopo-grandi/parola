@@ -292,7 +292,10 @@ def create_app(folder: Path, session: RecordingSession | None = None,
 
     @app.post("/api/record/{action}")
     def record_control(action: str) -> dict:
-        controls = {"stop": session.stop, "pause": session.pause, "resume": session.resume}
+        controls = {"stop": session.stop, "pause": session.pause, "resume": session.resume,
+                    # Only two people on the call, or more (decision 0058): this call only.
+                    "two": lambda: session.set_two_people(True),
+                    "many": lambda: session.set_two_people(False)}  # fmt: skip
         if action not in controls:
             raise HTTPException(status_code=404, detail="no such action")
         try:
@@ -657,9 +660,16 @@ def create_app(folder: Path, session: RecordingSession | None = None,
 
     @app.post("/api/recordings/{name}/voices")
     def name_voice(name: str, req: VoiceName) -> dict:
-        """A name for a voice, for the whole call: a label, not an edit of the transcript."""
-        t, path = _load(name)
+        """A name for a voice, for the whole call: a label, not an edit of the transcript.
+        While the call is still being transcribed the name waits in the session (decision 0058)."""
+        name = _check(name)
         title = " ".join(req.name.split())[:60]
+        try:
+            if session.name_voice(name, req.id, title):
+                return get_recording(name)
+        except SessionError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        t, path = _load(name)
         if title:
             t.metadata.speakers[req.id] = title
         else:
@@ -688,9 +698,16 @@ def create_app(folder: Path, session: RecordingSession | None = None,
     def export(name: str, fmt: str):
         name = _check(name)
         path = folder / f"{name}.json"
-        if not path.exists() or fmt not in ("txt", "md", "json", "docx"):
+        if fmt not in ("txt", "md", "json", "docx"):
             raise HTTPException(status_code=404, detail="no such export")
-        t = Transcript.load(path)
+        if path.exists():
+            t = Transcript.load(path)
+        elif (preview := session.provisional(name)) and preview[0] != "partial":
+            # Whisper is done on every channel: the words are final, only voices or doubtful
+            # words are still to come, so the text can already go out (decision 0058).
+            t = preview[1]
+        else:
+            raise HTTPException(status_code=404, detail="no such export")
         title = t.metadata.title or name
         # The file is named after the title the user gave; plain name as the ASCII fallback.
         stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", title).strip() or name

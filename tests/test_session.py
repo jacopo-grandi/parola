@@ -270,7 +270,10 @@ def test_progress_moves_during_each_step(tmp_path, monkeypatch):
     total = sum(WEIGHTS.values())
     reached = [(m, round(s, 2)) for m, s in seen]
     assert ("trascrizione", round(WEIGHTS["primary"] / 2 / total, 2)) in reached
-    assert ("chi parla", round((WEIGHTS["primary"] + WEIGHTS["second"]) / total, 2)) in reached
+    # The voices right after Whisper, the second opinion last (decision 0058).
+    assert ("chi parla", round(WEIGHTS["primary"] / total, 2)) in reached
+    after_voices = round((WEIGHTS["primary"] + WEIGHTS["speakers"]) / total, 2)
+    assert ("parole dubbie", after_voices) in reached
     assert first.on_progress is None and second.on_progress is None  # handed back
 
 
@@ -340,7 +343,8 @@ def wait_preview(session, stage, timeout=10):
 
 @requires_ffmpeg
 def test_the_text_shows_while_the_rest_runs_and_cannot_be_edited(tmp_path, helper, monkeypatch):
-    """Decision 0031: Whisper's text, read-only, then the doubtful words, then the final file."""
+    """Decisions 0031, 0058: Whisper's text, read-only but exportable, then the voices, which
+    can be named at once, then the doubtful words and the final file."""
     monkeypatch.setattr("parola.capture.recorder._speaker_models", lambda: True)
     voices_go = threading.Event()
 
@@ -355,7 +359,7 @@ def test_the_text_shows_while_the_rest_runs_and_cannot_be_edited(tmp_path, helpe
     client = TestClient(create_app(tmp_path, session=session))
     session.import_file(tone(tmp_path / "u.m4a"), "lezione.m4a", "it")
 
-    # Whisper is done, Parakeet is waiting: the text is there, without doubts or voices.
+    # Whisper is done, the voices are waiting: the text is there, without doubts or voices.
     st = wait_preview(session, "transcript")
     assert st["state"] == "transcribing" and st["preview"] == "transcript"
     rec = client.get("/api/recordings/lezione").json()
@@ -365,31 +369,40 @@ def test_the_text_shows_while_the_rest_runs_and_cannot_be_edited(tmp_path, helpe
     assert rec["voices"] == {} and rec["audio"] == {"mixed": "/audio/lezione/mixed"}
     assert rec["summary"]["title"] == "lezione" and rec["summary"]["source"] == "lezione.m4a"
     assert client.get("/audio/lezione/mixed").status_code == 200  # it can be listened to
+    # It can already go out: the words are final.
+    assert client.get("/export/lezione.txt").text.strip().endswith("] ciao a tutti")
     # Nothing can change it: the final file replaces it.
     span = {"segment": 0, "start": 0, "end": 1, "text": "salve"}
     assert client.post("/api/recordings/lezione/correct", json=span).status_code == 404
     assert client.post("/api/recordings/lezione/rename", json={"title": "x"}).status_code == 404
     assert client.delete("/api/recordings/lezione").status_code == 404
-    assert client.get("/export/lezione.txt").status_code == 404
     assert client.get("/api/recordings").json() == []  # listed once it is final
     assert not (tmp_path / "lezione.json").exists()
 
-    # Parakeet is done, the voices are running: now with the doubtful words.
-    second.go.set()
-    assert wait_preview(session, "doubts")["preview"] == "doubts"
-    rec = client.get("/api/recordings/lezione").json()
-    assert rec["provisional"] == "doubts"
-    words = [(w["text"], w["doubtful"]) for s in rec["segments"] for w in s["words"]]
-    assert words == [("ciao", False), ("a", False), ("tutti", True)]
-    assert not any(s["speaker"] for s in rec["segments"]) and rec["voices"] == {}
-    assert client.post("/api/recordings/lezione/correct", json=span).status_code == 404
-
-    # The final transcript: written, editable, with the voices.
+    # The voices are done, Parakeet is waiting: the voices are there, not the doubts yet.
     voices_go.set()
+    assert wait_preview(session, "voices")["preview"] == "voices"
+    rec = client.get("/api/recordings/lezione").json()
+    assert rec["provisional"] == "voices" and set(rec["voices"]) == {"mixed:1", "mixed:2"}
+    assert not any(w["doubtful"] for s in rec["segments"] for w in s["words"])
+    assert client.post("/api/recordings/lezione/correct", json=span).status_code == 404
+    # A voice can be named now: the name waits for the file.
+    marta = {"id": "mixed:2", "name": "Marta"}
+    rec = client.post("/api/recordings/lezione/voices", json=marta).json()
+    assert rec["voices"]["mixed:2"] == "Marta" and rec["provisional"] == "voices"
+    assert "Marta: tutti" in client.get("/export/lezione.txt").text
+    assert client.post("/api/recordings/lezione/voices",
+                       json={"id": "mixed:9", "name": "X"}).status_code == 400  # fmt: skip
+
+    # The final transcript: written, editable, with the doubts and the name given meanwhile.
+    second.go.set()
     st = wait_for(session, "done")
     assert st["state"] == "done" and st["preview"] is None
     rec = client.get("/api/recordings/lezione").json()
-    assert rec["provisional"] is None and set(rec["voices"]) == {"mixed:1", "mixed:2"}
+    assert rec["provisional"] is None and rec["voices"]["mixed:2"] == "Marta"
+    words = [(w["text"], w["doubtful"]) for s in rec["segments"] for w in s["words"]]
+    assert words == [("ciao", False), ("a", False), ("tutti", True)]
+    assert "Marta: (tutti?)" in (tmp_path / "lezione.txt").read_text()
     assert client.post("/api/recordings/lezione/correct", json=span).status_code == 200
 
 
@@ -408,3 +421,28 @@ def test_a_failure_after_whisper_leaves_no_provisional_text(tmp_path, helper, mo
     st = wait_for(session, "error")
     assert st["state"] == "error" and st["preview"] is None
     assert client.get("/api/recordings/lezione").status_code == 404
+
+
+@requires_ffmpeg
+def test_two_people_is_chosen_per_call(tmp_path, helper, monkeypatch):
+    """Decision 0058: chosen while recording, it skips the voices of that call only."""
+    monkeypatch.setattr("parola.capture.recorder._speaker_models", lambda: True)
+    monkeypatch.setattr("parola.diarize.diarize", lambda *a, **k: pytest.fail("diarized"))
+    backends = lambda: (Fake("tutto bene"), Fake("tutto bene"))  # noqa: E731
+    session = RecordingSession(tmp_path, binary=helper, backends=backends)
+    client = TestClient(create_app(tmp_path, session=session))
+    with pytest.raises(SessionError):
+        session.set_two_people(True)  # nothing being recorded
+    assert client.post("/api/record/start", json={"name": "uno"}).json()["two_people"] is False
+    time.sleep(0.3)
+    assert client.post("/api/record/two").json()["two_people"] is True
+    assert client.post("/api/record/many").json()["two_people"] is False
+    assert client.post("/api/record/two").json()["two_people"] is True
+    session.stop()
+    assert wait_for(session, "done")["state"] == "done"
+    t = Transcript.load(tmp_path / "uno.json")
+    assert {s.speaker for s in t.segments if s.channel == "system"} == {"system:1"}
+    assert client.post("/api/record/two").status_code == 409  # done: too late for this call
+    # The next call starts without it.
+    assert session.start(name="due")["two_people"] is False
+    session.abort()

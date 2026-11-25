@@ -729,17 +729,19 @@ async function render(data, after) {
     view.turns.push({ el: turn, text, si });
   });
   if (rec.provisional) {
-    // Whisper is done, the rest is still running (decision 0031): the text can be read and
-    // listened to, and is replaced by the final one, so nothing can be corrected yet.
+    // Whisper is done, the rest is still running (decisions 0031, 0058): the text can be read,
+    // listened to and exported, the voices named; corrections wait for the final one.
     view.stage = el("span", { class: "stage" });
     body.prepend(el("p", { class: "hint provisional" },
       rec.provisional === "partial"
-        ? "Whisper sta ancora trascrivendo: il testo cresce man mano, poi arrivano parole " +
-          "dubbie e chi parla. "
-        : rec.provisional === "doubts"
-          ? "Testo provvisorio con le parole dubbie: chi parla arriva tra poco. "
-          : "Testo provvisorio: parole dubbie e chi parla arrivano tra poco. ",
-      "Puoi leggerlo e ascoltarlo; le correzioni quando è pronto.", view.stage));
+        ? "Whisper sta ancora trascrivendo: il testo cresce man mano, poi arrivano chi parla " +
+          "e le parole dubbie. Puoi leggerlo e ascoltarlo. "
+        : rec.provisional === "voices"
+          ? "Il testo è completo e si può già esportare; clicca un nome per cambiarlo. " +
+            "Mancano solo le parole dubbie, poi le correzioni. "
+          : "Il testo è completo e si può già esportare: chi parla e le parole dubbie " +
+            "arrivano tra poco, poi le correzioni. ",
+      view.stage));
   } else if (runs.length) {
     body.prepend(el("p", { class: "hint" },
       "Clic su una parola per ascoltarla. ", el("kbd", {}, "N"), " passa alla prossima dubbia, ",
@@ -770,10 +772,10 @@ async function render(data, after) {
                      onclick: transAction }, "IT")
     : null;
   updateTransBtn();
-  // Exports read the final file: none while the transcript is provisional.
+  // Exports as soon as Whisper is done on every channel (decision 0058): the words are final.
   const actions = el("div", { class: "actions" }, view.transNote, view.transBtn,
                      voicesBtn, view.filter, undoBtn,
-                     rec.provisional ? null : more);
+                     rec.provisional === "partial" ? null : more);
   view.findInput = el("input", { class: "find-input", type: "search",
                                  placeholder: "Trova nella call  ⌘F",
                                  "aria-label": "Trova nella call", autocomplete: "off" });
@@ -1203,6 +1205,10 @@ function buildLive(floating) {
                                       "l'ingresso in Impostazioni di Sistema > Suono" },
     "mic muto?");
   const stop = iconButton("stop", "Ferma e trascrivi", () => recAction("stop"), "rec-stop");
+  // Only two people on the call (decision 0058): no "chi parla", Altri named at once. For
+  // this call only: the next one starts without it.
+  const two = iconButton("people", "", () => {});
+  two.classList.add("two-btn");
   // Live subtitles (ToTTI, decision 0038): only where the translation model is on disk.
   const subs = floating || !subsAvailable ? null
     : el("button", { class: "icon-btn subs-btn", title: "Sottotitoli live",
@@ -1212,7 +1218,7 @@ function buildLive(floating) {
   const pop = floating || window.parolaNative ? null
     : iconButton("popout", "Finestra mobile", () => openFloating(false));
   const root = el("div", { class: floating ? "rec-live pip-bar" : "rec-live" },
-    dot, time, meters, micWarn, pause, subs, pop, stop);
+    dot, time, meters, micWarn, pause, two, subs, pop, stop);
   return {
     root,
     update(st, micMute = false) {
@@ -1235,6 +1241,14 @@ function buildLive(floating) {
       pause.title = label;
       pause.setAttribute("aria-label", label);
       pause.onclick = () => recAction(st.paused ? "resume" : "pause");
+      const twoLabel = st.two_people
+        ? "Solo due persone: sì (clic per annullare)"
+        : "Solo due persone? Clic prima di fermare: niente «chi parla», Altri si rinomina subito";
+      two.classList.toggle("on", !!st.two_people);
+      two.title = twoLabel;
+      two.setAttribute("aria-label", "Solo due persone");
+      two.setAttribute("aria-pressed", String(!!st.two_people));
+      two.onclick = () => recAction(st.two_people ? "many" : "two");
     },
   };
 }
@@ -1318,8 +1332,8 @@ function renderRecorder() {
 
 const pendingView = {};
 // What the transcription is doing, from the progress message ("parole dubbie Altri" too).
-const STEPS = [["trascrizione", "Trascrizione"], ["parole dubbie", "Parole dubbie"],
-               ["chi parla", "Chi parla"]];
+const STEPS = [["trascrizione", "Trascrizione"], ["chi parla", "Chi parla"],
+               ["parole dubbie", "Parole dubbie"]];
 
 function renderPending() {
   // The call being uploaded or transcribed, at the top of the list, until it is ready. Once

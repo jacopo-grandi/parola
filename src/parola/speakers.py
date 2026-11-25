@@ -3,7 +3,8 @@
 A speaker id is ``<channel>:<n>``, numbered by first appearance: ``system:1`` is the first
 voice heard among the others, ``mixed:2`` the second voice of an imported file. The microphone
 channel is always the person recording ("Io") and gets no id. Names chosen by the person live
-in ``Metadata.speakers``; without one a voice shows as "Altri 1" or "Voce 1".
+in ``Metadata.speakers``; without one a voice shows as "Altri 1" or "Voce 1", or as "Altri"
+when it is the only voice of its channel.
 """
 
 from __future__ import annotations
@@ -23,7 +24,20 @@ def name(t: Transcript, speaker: str) -> str:
     if speaker in t.metadata.speakers:
         return t.metadata.speakers[speaker]
     channel, _, n = speaker.partition(":")
-    return f"{DEFAULT_PREFIX.get(channel, channel)} {n}"
+    prefix = DEFAULT_PREFIX.get(channel, channel)
+    # The only voice of its channel (a call with two people) is the side itself: "Altri".
+    alone = not any(s.speaker and s.speaker != speaker and s.speaker.startswith(f"{channel}:")
+                    for s in t.segments)  # fmt: skip
+    return prefix if alone else f"{prefix} {n}"
+
+
+def single_voice(t: Transcript, channel: str) -> Transcript:
+    """Every segment of ``channel`` to one voice: a call with two people (decision 0058), where
+    the other side needs no telling apart but must be nameable."""
+    sid = speaker_id(channel, 0)
+    segments = [s.model_copy(update={"speaker": sid}) if s.channel == channel else s
+                for s in t.segments]  # fmt: skip
+    return t.model_copy(update={"segments": segments})
 
 
 def label(t: Transcript, seg: Segment, side_labels: dict[str, str]) -> str:

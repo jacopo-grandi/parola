@@ -285,14 +285,14 @@ def test_voices_can_be_renamed_and_turns_moved(client, folder):
     t.segments[1].speaker = "system:1"
     t.save(folder / "call.json")
     rec = client.get("/api/recordings/call").json()
-    assert rec["voices"] == {"system:1": "Altri 1"}
+    assert rec["voices"] == {"system:1": "Altri"}  # the only voice of its side (decision 0058)
     rec = client.post(
         "/api/recordings/call/voices", json={"id": "system:1", "name": " Giulia "}
     ).json()
     assert rec["voices"] == {"system:1": "Giulia"} and rec["summary"]["edits"] == 0
     assert "Giulia: buongiorno" in (folder / "call.txt").read_text()
     rec = client.post("/api/recordings/call/speaker", json={"segment": 1, "speaker": "new"}).json()
-    assert rec["segments"][1]["speaker"] == "system:2" and rec["voices"]["system:2"] == "Altri 2"
+    assert rec["segments"][1]["speaker"] == "system:2" and rec["voices"]["system:2"] == "Altri"
     assert (
         client.post(
             "/api/recordings/call/speaker", json={"segment": 0, "speaker": "new"}

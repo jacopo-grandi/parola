@@ -170,16 +170,19 @@ uv run parola speakers NAME                # tell the voices apart on a call alr
 **● Registra** in the sidebar records a call without the terminal: timer, live levels for both
 sides (an empty "Altri" meter means system audio is not reaching the app: check the permission),
 pause, and a small floating window that stays on top of Meet (Chrome and Edge). **■** stops the
-recording and transcribes it in the background. Run `parola serve` from the same app you granted
-the audio permissions to (e.g. Terminal).
+recording and transcribes it in the background. If the call had only you and one other person,
+press the **two people** button before stopping: the voices are not told apart (the two sides
+already are the two people) and "Altri" can be named at once. It applies to that call only. Run
+`parola serve` from the same app you granted the audio permissions to (e.g. Terminal).
 
 To transcribe an audio or video file recorded elsewhere, use the upload button next to
 **Registra** or drop the file on the window. It asks the file's language first (Italiano,
 English, or Rileva to detect it; the last choice is offered first). It goes through the same
 transcription and doubtful words, on a single track: every voice is on it, so there is no "Io / Altri" split.
 While a file or a recording is being transcribed it shows at the top of the list, with its
-progress; click it to watch the text grow as Whisper writes it (read-only until the doubtful
-words and the voices are in).
+progress; click it to watch the text grow as Whisper writes it. Once Whisper is done the text
+can already be exported and the voices named; corrections wait until the voices and then the
+doubtful words, the last step, are in.
 
 The sidebar lists the calls by date. Its search box looks inside every transcript (case, accents
 and elided articles ignored: "perche" finds "perché", "impatto" finds "dell'impatto") and shows

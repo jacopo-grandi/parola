@@ -392,7 +392,7 @@ body.pip .rec-live.pip-bar { height: 100vh; border: 0; border-radius: 0; padding
 
 /* ------------------------------------------------- live subtitles (ToTTI, decision 0038) */
 .subs-btn { font: 700 10px var(--font-ui); letter-spacing: 0.5px; }
-.subs-btn.on { color: var(--accent); background: rgba(10, 132, 255, 0.12); }
+.subs-btn.on, .two-btn.on { color: var(--accent); background: rgba(10, 132, 255, 0.12); }
 /* display: grid beats the UA's [hidden] rule, so the empty strip showed while off. */
 .subtitles[hidden] { display: none; }
 .subtitles {

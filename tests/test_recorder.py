@@ -243,8 +243,9 @@ def test_transcribe_recording_merges_close_segments(tmp_path):
 
 
 @requires_ffmpeg
-def test_preview_comes_after_whisper_and_again_with_the_doubts(tmp_path, monkeypatch):
-    """Decision 0031: the text after Whisper, the doubts before the voices, never changed later."""
+def test_preview_comes_after_whisper_and_again_with_the_voices(tmp_path, monkeypatch):
+    """Decisions 0031, 0058: the text after Whisper, then with the voices, the doubts last;
+    a preview is never changed by the steps after it."""
     monkeypatch.setattr(recorder, "_speaker_models", lambda: True)
     monkeypatch.setattr("parola.diarize.diarize", lambda path, progress=None: [(0.0, 1.0, 0)])
     _write(tmp_path / "c.mixed.wav", "sine=frequency=440:duration=1")
@@ -260,24 +261,60 @@ def test_preview_comes_after_whisper_and_again_with_the_doubts(tmp_path, monkeyp
     json_path, _ = recorder.transcribe_recording(
         rec, FakeBackend(), second=Second(), preview=lambda stage, t: seen.append((stage, t))
     )
-    assert [stage for stage, _ in seen] == ["transcript", "doubts"]
-    first, doubts = seen[0][1], seen[1][1]
-    assert not any(w.doubtful for s in first.segments for w in s.words)  # a copy: not marked later
-    assert [w.doubtful for s in doubts.segments for w in s.words] == [False, True]
-    assert all(s.speaker is None for s in [*first.segments, *doubts.segments])
-    assert [s.speaker for s in Transcript.load(json_path).segments] == ["mixed:1"]
+    assert [stage for stage, _ in seen] == ["transcript", "voices"]
+    first, voices = seen[0][1], seen[1][1]
+    assert all(s.speaker is None for s in first.segments)
+    assert [s.speaker for s in voices.segments] == ["mixed:1"]
+    # Copies: the doubtful words marked afterwards never reach them.
+    assert not any(w.doubtful for s in [*first.segments, *voices.segments] for w in s.words)
+    final = Transcript.load(json_path)
+    assert [s.speaker for s in final.segments] == ["mixed:1"]
+    assert [w.doubtful for s in final.segments for w in s.words] == [False, True]
 
 
 @requires_ffmpeg
-def test_no_doubts_stage_when_nothing_follows(tmp_path, monkeypatch):
-    # Without voices the final transcript comes right after the doubts: no stage in between.
+def test_one_preview_when_there_are_no_voices_to_wait_for(tmp_path, monkeypatch):
+    # Without voices the text is final right after Whisper: only the doubts are to come.
     monkeypatch.setattr(recorder, "_speaker_models", lambda: False)
     _write(tmp_path / "c.mixed.wav", "sine=frequency=440:duration=1")
     rec = recorder.Recording("c", tmp_path, {"mixed": {"seconds": 1.0}})
     seen = []
     recorder.transcribe_recording(rec, FakeBackend(), second=FakeBackend(),
                                   preview=lambda stage, t: seen.append(stage))  # fmt: skip
-    assert seen == ["transcript"]
+    assert seen == ["voices"]
+
+
+@requires_ffmpeg
+def test_two_people_skips_the_voices_and_keeps_the_doubts(tmp_path, monkeypatch):
+    """Decision 0058: with only two people nobody is told apart, the other side is one voice
+    that can be named at once, and the doubtful words still come, last."""
+    monkeypatch.setattr(recorder, "_speaker_models", lambda: pytest.fail("models looked up"))
+    monkeypatch.setattr("parola.diarize.diarize", lambda *a, **k: pytest.fail("diarized"))
+    for c in ("mic", "system"):
+        _write(tmp_path / f"c.{c}.wav", "sine=frequency=440:duration=1")
+    rec = recorder.Recording("c", tmp_path, {"mic": {"seconds": 1.0}, "system": {"seconds": 1.0}})
+
+    class Sides(FakeBackend):
+        """The mic first, then the other side, as the channels are transcribed."""
+
+        def __init__(self, other):
+            super().__init__()
+            self.texts = ["ciao come va", other]
+
+        def transcribe(self, wav_path, language=None):
+            text = self.texts.pop(0)
+            start = 0 if text.startswith("ciao") else 2
+            return ASRResult(segments=[seg(start, start + 1, text)], language="it")
+
+    seen = []
+    json_path, txt_path = recorder.transcribe_recording(
+        rec, Sides("tutto bene grazie"), second=Sides("tutto bene grazia"), two_people=True,
+        preview=lambda stage, t: seen.append((stage, t)))  # fmt: skip
+    assert [stage for stage, _ in seen] == ["voices"]
+    t = Transcript.load(json_path)
+    assert [(s.channel, s.speaker) for s in t.segments] == [("mic", None), ("system", "system:1")]
+    assert [w.text for w in t.segments[1].words if w.doubtful] == ["grazie"]
+    assert "Altri: tutto bene (grazie?)" in txt_path.read_text()
 
 
 @requires_ffmpeg
@@ -328,11 +365,12 @@ def test_the_text_grows_while_whisper_works(tmp_path, monkeypatch):
 
     seen = []
     backend = Growing()
-    recorder.transcribe_recording(rec, backend, preview=lambda stage, t: seen.append(
-        (stage, [s.text for s in t.segments])))  # fmt: skip
+    recorder.transcribe_recording(rec, backend, second=FakeBackend(),
+                                  preview=lambda stage, t: seen.append(
+                                      (stage, [s.text for s in t.segments])))  # fmt: skip
     # Close sentences are joined as in the final transcript (merge_segments).
     assert seen[:2] == [("partial", ["prima frase"]), ("partial", ["prima frase seconda frase"])]
-    assert seen[-1][0] == "transcript"
+    assert seen[-1][0] == "voices"
     assert backend.on_segments is None  # unhooked when the channel is done
 
 
@@ -354,8 +392,8 @@ def test_a_failing_preview_never_costs_the_transcript(tmp_path, monkeypatch, cap
             return ASRResult(segments=done, language="it")
 
     seen = []
-    json_path, _ = recorder.transcribe_recording(rec, OutOfOrder(),
+    json_path, _ = recorder.transcribe_recording(rec, OutOfOrder(), second=FakeBackend(),
                                                  preview=lambda s, t: seen.append(s))  # fmt: skip
     assert json_path.exists()  # the call is saved despite the broken preview
     assert "partial preview skipped" in capsys.readouterr().err
-    assert seen[-1] == "transcript"  # the previews after the decode still arrive
+    assert seen[-1] == "voices"  # the previews after the decode still arrive

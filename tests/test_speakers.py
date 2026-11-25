@@ -62,7 +62,9 @@ def test_no_turns_leaves_the_call_as_it_was():
 def test_names_and_labels():
     t = assign(call("mixed"), "mixed", [(0, 3, 0)])
     seg = t.segments[0]
-    assert name(t, "mixed:1") == "Voce 1" and name(t, "system:2") == "Altri 2"
+    assert name(t, "mixed:1") == "Voce"  # the only voice of its channel (decision 0058)
+    two = assign(call("mixed"), "mixed", [(0.0, 1.3, 0), (1.3, 3.0, 1)])
+    assert name(two, "mixed:1") == "Voce 1" and name(two, "mixed:2") == "Voce 2"
     t.metadata.speakers["mixed:1"] = "Giulia"
     assert label(t, seg, {"mixed": ""}) == "Giulia"
     assert label(t, t.segments[-1], {"mic": "Io"}) == "Io"
@@ -85,3 +87,15 @@ def test_spectral_clusters_finds_how_many_voices():
     labels = spectral_clusters(X)
     assert len(set(labels)) == 3
     assert all(len(set(labels[i * 40 : (i + 1) * 40])) == 1 for i in range(3))
+
+
+def test_a_call_with_two_people_has_one_other_voice():
+    from parola.speakers import single_voice
+
+    t = single_voice(call(), "system")
+    voices = {s.speaker for s in t.segments if s.channel == "system"}
+    assert voices == {"system:1"} and all(s.speaker is None for s in t.segments
+                                          if s.channel != "system")  # fmt: skip
+    assert name(t, "system:1") == "Altri"
+    t.metadata.speakers["system:1"] = "Marta"
+    assert name(t, "system:1") == "Marta"

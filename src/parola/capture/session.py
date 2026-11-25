@@ -21,7 +21,7 @@ from pathlib import Path
 
 from parola.asr import release_models
 from parola.audio import extract_audio, wav_duration
-from parola.capture.recorder import Recording, build_helper, transcribe_recording
+from parola.capture.recorder import Recording, build_helper, to_dialogue, transcribe_recording
 from parola.schema import Transcript
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -63,6 +63,12 @@ class RecordingSession:
         # memory only, so nothing can edit it and nothing stale is left if the app stops.
         self._preview: tuple[str, Transcript] | None = None
         self._revision = 0
+        # Only the person recording and one other (decision 0058): no telling voices apart.
+        # Chosen per call, before the transcription starts; every new call starts without it.
+        self.two_people = False
+        # Names given to voices while the call is still being transcribed: the file does not
+        # exist yet, so they wait here and are written with it (decision 0058).
+        self._voice_names: dict[str, str] = {}
 
     # ---------------------------------------------------------------- recording
 
@@ -87,7 +93,7 @@ class RecordingSession:
             self.source = None
             self.started, self.levels, self.message, self.step = time.time(), {}, "", (0, 0)
             self.paused_at, self.paused_total, self._ready = None, 0.0, False
-            self._preview = None
+            self._preview, self.two_people, self._voice_names = None, False, {}
             threading.Thread(target=self._read_levels, args=(self._proc,), daemon=True).start()
         return self.status()
 
@@ -126,6 +132,13 @@ class RecordingSession:
             self.paused_at = None
         return self.status()
 
+    def set_two_people(self, on: bool) -> dict:
+        with self._lock:
+            if self.state != "recording":
+                raise SessionError("not recording")
+            self.two_people = on
+        return self.status()
+
     def stop(self) -> dict:
         with self._lock:
             if self.state != "recording" or self._proc is None:
@@ -158,9 +171,13 @@ class RecordingSession:
 
         try:
             backend, second = self._backends()
-            transcribe_recording(rec, backend, self.language, second=second, progress=progress,
-                                 preview=preview)  # fmt: skip
-            self.state, self.message = "done", ""
+            json_path, txt_path = transcribe_recording(
+                rec, backend, self.language, second=second, progress=progress, preview=preview,
+                two_people=self.two_people)  # fmt: skip
+            with self._lock:  # a name given now waits for the lock, then goes to the file
+                if self._voice_names:
+                    _write_voice_names(json_path, txt_path, self._voice_names)
+                self.state, self.message = "done", ""
         except Exception as e:  # shown in the UI; the audio files stay on disk
             # Before the state: a status read between the two assignments must never pair
             # "error" with leftover provisional text (it flaked exactly so on a slow CI runner).
@@ -188,6 +205,7 @@ class RecordingSession:
             self.source = original
             self.started, self.levels, self.message, self.step = None, {}, "conversione", (0, 0)
             self.paused_at, self.paused_total, self._preview = None, 0.0, None
+            self.two_people, self._voice_names = False, {}
         threading.Thread(target=self._import, args=(upload, original, name, started_at),
                          daemon=True).start()  # fmt: skip
         return self.status()
@@ -232,11 +250,29 @@ class RecordingSession:
     # ---------------------------------------------------------------- status
 
     def provisional(self, name: str) -> tuple[str, Transcript] | None:
-        """The stage and transcript so far of the call being transcribed, if it is ``name``."""
+        """The stage and transcript so far of the call being transcribed, if it is ``name``,
+        with the names already given to its voices."""
         preview = self._preview  # one read: the thread may replace it meanwhile
         if preview is None or self.name != name or self.state != "transcribing":
             return None
-        return preview
+        stage, t = preview
+        if self._voice_names:
+            speakers = _named(t.metadata.speakers, self._voice_names)
+            metadata = t.metadata.model_copy(update={"speakers": speakers})
+            t = t.model_copy(update={"metadata": metadata})
+        return stage, t
+
+    def name_voice(self, name: str, voice: str, title: str) -> bool:
+        """Keep a voice's name for the call being transcribed, if it is ``name`` and its voices
+        are already known; False when the name belongs in the file (decision 0058)."""
+        with self._lock:
+            preview = self._preview
+            if preview is None or self.name != name or self.state != "transcribing":
+                return False
+            if not any(s.speaker == voice for s in preview[1].segments):
+                raise SessionError(f"no voice {voice!r}")
+            self._voice_names[voice] = title
+            return True
 
     def status(self) -> dict:
         elapsed = 0.0
@@ -254,8 +290,28 @@ class RecordingSession:
             "levels": {} if self.paused_at is not None else self.levels,
             "message": self.message,
             "step": list(self.step),
-            # "partial" while Whisper works (decision 0033), "transcript" once it is done,
-            # "doubts" with the doubtful words, else None.
+            # "partial" while Whisper works (decision 0033), "transcript" once it is done and
+            # the voices are still to come, "voices" when only the doubtful words are missing
+            # (decision 0058), else None.
             "preview": preview[0] if preview else None,
             "revision": self._revision,
+            "two_people": self.two_people,
         }
+
+
+def _named(speakers: dict[str, str], names: dict[str, str]) -> dict[str, str]:
+    """``speakers`` with ``names`` applied: an empty name gives the voice its default back."""
+    out = dict(speakers)
+    for voice, title in names.items():
+        if title:
+            out[voice] = title
+        else:
+            out.pop(voice, None)
+    return out
+
+
+def _write_voice_names(json_path: Path, txt_path: Path, names: dict[str, str]) -> None:
+    t = Transcript.load(json_path)
+    t.metadata.speakers = _named(t.metadata.speakers, names)
+    t.save(json_path)
+    txt_path.write_text(to_dialogue(t), encoding="utf-8")

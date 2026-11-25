@@ -79,17 +79,21 @@ final class FloatingRecorder {
     private var watch: AnyCancellable?
 
     static let full = NSSize(width: 252, height: 48)
+    /// The "two people" toggle on the recording bar (decision 0058): one button more.
+    static let peopleWidth: CGFloat = 30
     static let icon = NSSize(width: 40, height: 40)
     /// The bar must grow with the CC toggle, or the dot and the minus touch the borders.
-    static func barWidth(cc: Bool) -> CGFloat { cc ? 290 : full.width }
+    static func barWidth(cc: Bool, recording: Bool = true) -> CGFloat {
+        (cc ? 290 : full.width) + (recording ? peopleWidth : 0)
+    }
     // The subtitle strip under the panel (ToTTI, decision 0038): wide enough to read a line,
     // so the panel can sit at the screen edge where subtitles normally live.
     static let stripWidth: CGFloat = 480
     // Room for the previous line plus two live lines at 16 pt: at 66 the bottom-aligned
     // stack clipped the previous line whenever the live text wrapped.
     static let stripHeight: CGFloat = 78
-    /// The call question: room for the app's name and two buttons.
-    static let prompt = NSSize(width: 372, height: 48)
+    /// The call question: room for the app's name, two buttons and the "two people" toggle.
+    static let prompt = NSSize(width: 404, height: 48)
 
     private var watchSubs: [AnyCancellable] = []
     private var watchPrompt: AnyCancellable?
@@ -152,7 +156,8 @@ final class FloatingRecorder {
     private func panelSize() -> NSSize {
         let base = model.prompt != nil ? Self.prompt : model.compact
             ? Self.icon
-            : NSSize(width: Self.barWidth(cc: model.subsAvailable && !model.listening),
+            : NSSize(width: Self.barWidth(cc: model.subsAvailable && !model.listening,
+                                          recording: !model.listening),
                      height: Self.full.height)
         guard model.subsOn else { return base }
         return NSSize(width: Self.stripWidth, height: base.height + 6 + Self.stripHeight)
@@ -213,6 +218,8 @@ final class FloatingRecorder {
 final class RecorderModel: ObservableObject {
     @Published var elapsed: Double = 0
     @Published var paused = false
+    /// Only two people on the call (decision 0058): no "chi parla". This call only.
+    @Published var twoPeople = false
     /// Subtitles without a recording (decision 0042): still dot, no timer, no pause or stop.
     @Published var listening = false
     @Published var levels: (mic: Double?, system: Double?) = (nil, nil)
@@ -240,6 +247,7 @@ final class RecorderModel: ObservableObject {
     func apply(_ status: [String: Any]) {
         elapsed = status["elapsed"] as? Double ?? 0
         paused = status["paused"] as? Bool ?? false
+        twoPeople = status["two_people"] as? Bool ?? false
         listening = (status["state"] as? String) != "recording" && (status["listening"] as? Bool ?? false)
         let lv = status["levels"] as? [String: Double] ?? [:]
         levels = (lv["mic"], lv["system"])
@@ -284,7 +292,10 @@ struct RecorderView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Group {
-                if let prompt = model.prompt { CallPromptBar(prompt: prompt, act: model.onPrompt) }
+                if let prompt = model.prompt {
+                    CallPromptBar(prompt: prompt, act: model.onPrompt, twoPeople: model.twoPeople,
+                                  togglePeople: { model.onAction(model.twoPeople ? "many" : "two") })
+                }
                 else if model.compact { icon } else if model.listening { listenBar } else { full }
             }
             // The subtitle strip hangs under the bar (and under the dot too), so the panel
@@ -397,6 +408,11 @@ struct RecorderView: View {
             control(model.paused ? "play.fill" : "pause.fill", model.paused ? "Riprendi" : "Pausa") {
                 model.onAction(model.paused ? "resume" : "pause")
             }
+            control(model.twoPeople ? "person.2.fill" : "person.2",
+                    model.twoPeople ? "Solo due persone: sì" : "Solo due persone? (niente «chi parla»)",
+                    active: model.twoPeople) {
+                model.onAction(model.twoPeople ? "many" : "two")
+            }
             if model.subsAvailable {
                 control("captions.bubble", "Sottotitoli live", active: model.subsOn) {
                     model.toggleSubs()
@@ -442,7 +458,8 @@ struct RecorderView: View {
             control("xmark", "Spegni i sottotitoli") { model.onListen(false) }
         }
         .padding(.horizontal, 14)
-        .frame(width: FloatingRecorder.barWidth(cc: false), height: FloatingRecorder.full.height)
+        .frame(width: FloatingRecorder.barWidth(cc: false, recording: false),
+               height: FloatingRecorder.full.height)
         .background(DragArea(onClick: nil, onDoubleClick: { AppDelegate.shared?.showMainWindow() }))
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.88)))
@@ -483,6 +500,10 @@ struct RecorderView: View {
 struct CallPromptBar: View {
     let prompt: CallPrompt
     let act: (PromptAction) -> Void
+    /// The "two people" toggle (decision 0058), here too: the end of the call is when it is
+    /// pressed, and the question takes the recorder's place then.
+    var twoPeople = false
+    var togglePeople: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 10) {
@@ -574,6 +595,17 @@ struct CallPromptBar: View {
 
     private var endedButtons: some View {
         HStack(spacing: 4) {
+            Button(action: togglePeople) {
+                Image(systemName: twoPeople ? "person.2.fill" : "person.2")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(twoPeople ? Color.accentColor : .white.opacity(0.85))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(twoPeople ? "Solo due persone: sì" : "Solo due persone? (niente «chi parla»)")
+            .accessibilityLabel("Solo due persone")
+            .accessibilityAddTraits(twoPeople ? .isSelected : [])
             pill("Ferma e trascrivi", primary: true) { act(.stop) }
             pill("Continua", primary: false) { act(.keepRecording) }
         }

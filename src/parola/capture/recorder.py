@@ -285,7 +285,8 @@ WEIGHTS = {"primary": 3.0, "second": 1.2, "speakers": 3.4}
 
 def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | None = None,
                          second: ASRBackend | None = None, progress=None,
-                         speakers: bool = True, preview=None) -> tuple[Path, Path]:  # fmt: skip
+                         speakers: bool = True, preview=None,
+                         two_people: bool = False) -> tuple[Path, Path]:  # fmt: skip
     """Transcribe each channel and write <name>.json and <name>.txt next to the audio.
 
     With ``second``, each channel is also transcribed by a second system and the words of the
@@ -293,10 +294,14 @@ def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | No
     catches about two thirds of turbo's errors while flagging 12% of the words
     (results/2026-10-16-doubt-analisi.md).
 
+    With ``two_people`` the call had only the person recording and one other: the voices are not
+    told apart, the other side is one voice (decision 0058).
+
     ``preview(stage, transcript)`` receives the provisional transcript as soon as Whisper is done
-    on every channel (stage ``"transcript"``) and again with the doubtful words when the voices
-    are still to come (stage ``"doubts"``), so the app can show the text while it waits
-    (decision 0031). Nothing is written to disk before the final transcript.
+    on every channel when the voices are still to come (stage ``"transcript"``), and again with
+    the voices when only the doubtful words are missing (stage ``"voices"``), so the app can
+    show and export the text while it waits (decisions 0031, 0058). Nothing is written to disk
+    before the final transcript.
     """
     parts: dict[str, Transcript] = {}
     with_speech = []
@@ -328,7 +333,7 @@ def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | No
         raise CaptureError("every channel is silent: nothing to transcribe")
     # Progress in units of work (WEIGHTS). Telling voices apart (decision 0026) runs on the
     # channels with several people on them.
-    voiced = [c for c in with_speech if c in VOICED_CHANNELS] if speakers else []
+    voiced = [c for c in with_speech if c in VOICED_CHANNELS] if speakers and not two_people else []
     if voiced:
         voiced = _speaker_models() and voiced
     weights = WEIGHTS
@@ -382,11 +387,11 @@ def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | No
     duration = max(rec.capture[c]["seconds"] for c in with_speech)
     audio_file = f"{rec.name}.*.wav"
 
-    def show(stage: str) -> None:
+    def show(stage: str, t: Transcript) -> None:
         if preview is not None:
-            preview(stage, provisional(parts, audio_file, duration))
+            preview(stage, t.model_copy(deep=True))  # a copy: the flags still to come stay out
 
-    # Whisper on every channel first, so the text can be shown before the second opinion; each
+    # Whisper on every channel first, so the text can be shown before the other steps; each
     # run is independent, so the order does not change the result.
     work = {c: rec.out_dir / f".{rec.name}.{c}" for c in with_speech}
     side = {c: f" {LABELS[c]}" if LABELS[c] else "" for c in with_speech}
@@ -394,19 +399,11 @@ def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | No
         parts[channel] = run(backend, "primary", rec.path(channel), work[channel],
                              f"trascrizione{side[channel]}", channel=channel)  # fmt: skip
         done += weights["primary"]
-    show("transcript")
-    if second is not None:
-        for channel in with_speech:
-            other = run(second, "second", rec.path(channel), work[channel] / "second",
-                        f"parole dubbie{side[channel]}")  # fmt: skip
-            done += weights["second"]
-            n = mark_doubts(parts[channel], other)
-            total = sum(len(seg.words) for seg in parts[channel].segments)
-            print(f"{channel}: {n} doubtful words out of {total}", file=sys.stderr)
-        if voiced:
-            show("doubts")
-    for channel in with_speech:
-        shutil.rmtree(work[channel], ignore_errors=True)
+    # Each channel as Whisper wrote it, before the echo is dropped and the segments are joined:
+    # the second opinion is compared with exactly this, as when it ran right after Whisper
+    # (decision 0058). The segments share their words with the final transcript, so the flags
+    # set on them land there.
+    whisper = {c: t.model_copy(update={"segments": list(t.segments)}) for c, t in parts.items()}
     if "mic" in parts and "system" in parts:
         n = drop_echo(parts["mic"], parts["system"])
         if n:
@@ -415,8 +412,17 @@ def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | No
     # at most 1 s (up to 30 s), as for annotation drafts. Words and their flags do not change.
     from parola.annotate import merge_segments
 
-    parts = {c: merge_segments(t) for c, t in parts.items()}
-    merged = merge_channels(parts, audio_file, duration)
+    merged = merge_channels({c: merge_segments(t) for c, t in parts.items()}, audio_file, duration)
+    if two_people:
+        # Only the person recording and one other (decision 0058): the other side is one
+        # voice, which can be named at once; nothing to tell apart.
+        from parola.speakers import single_voice
+
+        for channel in with_speech:
+            if channel in VOICED_CHANNELS:
+                merged = single_voice(merged, channel)
+    elif voiced:
+        show("transcript", merged)
     for channel in voiced or []:
         from parola import diarize
         from parola.speakers import assign
@@ -435,6 +441,19 @@ def transcribe_recording(rec: Recording, backend: ASRBackend, language: str | No
         done += weights["speakers"]
     if voiced:
         merged = merge_segments(merged)
+    # The second opinion last (decision 0058): it only marks words, never changes them, so the
+    # text and the voices are final from here and can be exported while it runs.
+    if second is not None:
+        show("voices", merged)
+        for channel in with_speech:
+            other = run(second, "second", rec.path(channel), work[channel] / "second",
+                        f"parole dubbie{side[channel]}")  # fmt: skip
+            done += weights["second"]
+            n = mark_doubts(whisper[channel], other)
+            total = sum(len(seg.words) for seg in whisper[channel].segments)
+            print(f"{channel}: {n} doubtful words out of {total}", file=sys.stderr)
+    for channel in with_speech:
+        shutil.rmtree(work[channel], ignore_errors=True)
     json_path = rec.out_dir / f"{rec.name}.json"
     txt_path = rec.out_dir / f"{rec.name}.txt"
     # A title from what was said (decision 0020): only a label, the person can change it.
