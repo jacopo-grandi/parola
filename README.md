@@ -184,6 +184,11 @@ progress; click it to watch the text grow as Whisper writes it. Once Whisper is 
 can already be exported and the voices named; corrections wait until the voices and then the
 doubtful words, the last step, are in.
 
+Calls can be grouped into **projects**: folders at the top of the sidebar (+ to create one).
+Drag a call onto a folder, or use "Sposta in progetto" in its menu; a call is in one project
+at most, and deleting a project keeps its calls. The folder's menu downloads the whole project
+as a zip, one Word, Markdown or text file per call.
+
 The sidebar lists the calls by date. Its search box looks inside every transcript (case, accents
 and elided articles ignored: "perche" finds "perché", "impatto" finds "dell'impatto") and shows
 where each call says it; a result opens the call at that point, with every occurrence marked

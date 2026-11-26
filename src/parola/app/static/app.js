@@ -49,6 +49,10 @@ const ICONS = {
   close: '<path d="M7 7l10 10M17 7L7 17"/>',
   people: '<circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/>' +
           '<circle cx="17" cy="9" r="2.4"/><path d="M15.8 14.2c2.4.1 4 1.7 4.7 4.3"/>',
+  folder: '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v7.8A1.5 1.5 0 0 1 19 19H5' +
+          'a1.5 1.5 0 0 1-1.5-1.5z"/>',
+  plus: '<path d="M12 5.5v13M5.5 12h13"/>',
+  chevron: '<path d="M9.5 6.5L15 12l-5.5 5.5"/>',
   gear: '<circle cx="12" cy="12" r="5.2"/><circle cx="12" cy="12" r="1.7"/>' +
         '<path d="M17.2 12h2.2M12 17.2v2.2M6.8 12H4.6M12 6.8V4.6M15.68 15.68l1.56 1.56' +
         'M8.32 15.68l-1.56 1.56M8.32 8.32L6.76 6.76M15.68 8.32l1.56-1.56"/>',
@@ -137,11 +141,215 @@ function popMenu(anchor, ...items) {
 
 // ---------------------------------------------------------------- sidebar
 
-let calls = [];   // summaries from /api/recordings, newest first
+let calls = [];      // summaries from /api/recordings, newest first, each with its project
+let projects = [];   // [{id, name}] from /api/projects, alphabetical (decision 0059)
+// Which project folders are open: remembered in this browser, closed by default.
+let openProjects = new Set();
+try { openProjects = new Set(JSON.parse(localStorage.getItem("openProjects") || "[]")); }
+catch (e) { /* not kept */ }
+let newProjectFor = undefined;  // the inline "Nuovo progetto" field: undefined = closed
+
+function saveOpenProjects() {
+  try { localStorage.setItem("openProjects", JSON.stringify([...openProjects])); }
+  catch (e) { /* not kept */ }
+}
 
 async function refreshCalls() {
-  calls = await getJSON("/api/recordings");
+  [calls, projects] = await Promise.all([getJSON("/api/recordings"), getJSON("/api/projects")]);
   renderCalls();
+}
+
+function callRow(c, inProject) {
+  const date = new Date(c.started_at);
+  const title = el("span", { class: "title" }, c.title);
+  const sub = el("span", { class: "sub" }, `${shortWhen(date)} · ${minutes(c.duration)}`,
+    c.error ? el("span", { class: "n" }, " · trascrizione illeggibile") :
+    c.to_review ? el("span", { class: "n" }, ` · ${c.to_review} da rivedere`) : null);
+  // The full title on hover: the row truncates it.
+  const a = el("a", { class: "call", href: `#/rec/${enc(c.name)}`, title: c.title }, title, sub);
+  a.addEventListener("dblclick", e => { e.preventDefault(); renameInPlace(title, c); });
+  // Dragged onto a project folder (or out of one, onto the other calls) to move it.
+  a.addEventListener("dragstart", e => {
+    e.dataTransfer.setData("text/x-parola-call", c.name);
+    e.dataTransfer.effectAllowed = "move";
+  });
+  const row = el("div", { class: "call-row" + (c.name === recName ? " active" : "") +
+                                 (inProject ? " in-project" : "") }, a);
+  row.append(iconButton("more", `Altre azioni per ${c.title}`, e => {
+    e.stopPropagation();
+    popMenu(row,
+      el("button", { role: "menuitem", onclick: () => renameInPlace(title, c) }, "Rinomina"),
+      el("button", { role: "menuitem", onclick: () => suggestTitle(title, c) },
+        "Titolo dal contenuto"),
+      el("button", { role: "menuitem", onclick: () => setTimeout(() => moveMenu(row, c)) },
+        "Sposta in progetto…"),
+      el("button", { role: "menuitem", class: "danger", onclick: () => deleteCall(c) },
+        "Elimina"));
+  }, "call-more"));
+  return row;
+}
+
+function moveMenu(row, c) {
+  // Where the call can go: every other project, out of its project, or a new one.
+  const items = projects.filter(p => p.id !== c.project).map(p =>
+    el("button", { role: "menuitem", onclick: () => moveCall(c.name, p.id) }, p.name));
+  if (c.project) {
+    items.push(el("button", { role: "menuitem", onclick: () => moveCall(c.name, null) },
+      "Nessun progetto"));
+  }
+  if (items.length) items.push(el("hr"));
+  items.push(el("button", { role: "menuitem", onclick: () => startNewProject(c.name) },
+    "Nuovo progetto…"));
+  popMenu(row, ...items);
+}
+
+async function moveCall(name, project) {
+  try { await postJSON(`/api/recordings/${enc(name)}/project`, { project }); }
+  catch (e) { toast(`Call non spostata: ${e.message}`); return; }
+  if (project) { openProjects.add(project); saveOpenProjects(); }
+  await refreshCalls();
+}
+
+function startNewProject(callName = null) {
+  // The field opens under "Progetti"; with a call, the call goes into the new project.
+  newProjectFor = callName;
+  renderCalls();
+}
+
+function newProjectField() {
+  const input = el("input", { class: "inline project-input", maxlength: "60",
+                              placeholder: "Nome del progetto", "aria-label": "Nome del progetto" });
+  let finished = false;
+  const finish = async save => {
+    if (finished) return;
+    finished = true;
+    const callName = newProjectFor;
+    newProjectFor = undefined;
+    const name = input.value.trim();
+    if (save && name) {
+      try {
+        const p = await postJSON("/api/projects", { name });
+        openProjects.add(p.id);
+        saveOpenProjects();
+        if (callName) await postJSON(`/api/recordings/${enc(callName)}/project`, { project: p.id });
+      } catch (e) { toast(`Progetto non creato: ${e.message}`); }
+    }
+    await refreshCalls();
+  };
+  input.addEventListener("keydown", e => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  setTimeout(() => input.focus());
+  return el("div", { class: "project-new" }, input);
+}
+
+function renameProjectInPlace(toggle, p) {
+  // The folder's button becomes a field (an input inside a button would click it on Space).
+  const input = el("input", { class: "inline project-input", value: p.name, maxlength: "60",
+                              "aria-label": "Nome del progetto" });
+  toggle.replaceWith(el("div", { class: "project-new" }, input));
+  input.focus();
+  input.select();
+  let finished = false;
+  const finish = async save => {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    if (save && name && name !== p.name) {
+      try { await postJSON(`/api/projects/${enc(p.id)}/rename`, { name }); }
+      catch (e) { toast(`Progetto non rinominato: ${e.message}`); }
+    }
+    await refreshCalls();
+  };
+  input.addEventListener("keydown", e => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); });
+  input.addEventListener("blur", () => finish(true));
+}
+
+async function deleteProject(p, count) {
+  try {
+    const r = await fetch(`/api/projects/${enc(p.id)}`, { method: "DELETE" });
+    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+  } catch (e) { toast(`Progetto non eliminato: ${e.message}`); return; }
+  openProjects.delete(p.id);
+  saveOpenProjects();
+  await refreshCalls();
+  const kept = count === 1 ? "la sua call resta" : `le sue ${count} call restano`;
+  toast(count ? `Progetto “${p.name}” eliminato: ${kept} nell'elenco`
+              : `Progetto “${p.name}” eliminato`);
+}
+
+function dropTarget(node, project) {
+  // A call dropped here goes into `project` (null: out of any project).
+  node.addEventListener("dragover", e => {
+    if (!e.dataTransfer.types.includes("text/x-parola-call")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    node.classList.add("drop");
+  });
+  node.addEventListener("dragleave", e => {
+    if (!node.contains(e.relatedTarget)) node.classList.remove("drop");
+  });
+  node.addEventListener("drop", e => {
+    const name = e.dataTransfer.getData("text/x-parola-call");
+    node.classList.remove("drop");
+    if (!name) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const c = calls.find(x => x.name === name);
+    if (c && (c.project || null) !== project) moveCall(name, project);
+  });
+}
+
+function projectBlock(p, inside, filtering) {
+  const open = filtering || openProjects.has(p.id);
+  const name = el("span", { class: "project-name" }, p.name);
+  const toggle = el("button", { class: "project-toggle", "aria-expanded": String(open),
+                                title: open ? "Chiudi il progetto" : "Apri il progetto",
+                                onclick: () => {
+                                  if (openProjects.has(p.id)) openProjects.delete(p.id);
+                                  else openProjects.add(p.id);
+                                  saveOpenProjects();
+                                  renderCalls();
+                                } },
+    icon("chevron", 12), icon("folder", 15), name,
+    el("span", { class: "project-count" }, String(inside.length)));
+  toggle.addEventListener("dblclick", e => { e.preventDefault(); renameProjectInPlace(toggle, p); });
+  const head = el("div", { class: "project-head" }, toggle);
+  const zip = (fmt, label) => el("a", { role: "menuitem",
+                                        href: `/export/project/${enc(p.id)}.zip?format=${fmt}` },
+    label);
+  head.append(iconButton("more", `Altre azioni per il progetto ${p.name}`, e => {
+    e.stopPropagation();
+    popMenu(head,
+      el("button", { role: "menuitem", onclick: () => renameProjectInPlace(toggle, p) },
+        "Rinomina"),
+      el("hr"),
+      ...(inside.length
+        ? [zip("docx", "Scarica tutto: Word (.zip)"), zip("md", "Scarica tutto: Markdown (.zip)"),
+           zip("txt", "Scarica tutto: Testo (.zip)")]
+        : [el("span", { class: "menu-note" }, "Nessuna call da scaricare")]),
+      el("hr"),
+      el("button", { role: "menuitem", class: "danger",
+                     onclick: () => deleteProject(p, inside.length) },
+        "Elimina progetto (le call restano)"));
+  }, "call-more"));
+  const block = el("div", { class: "project" + (open ? " open" : ""), "data-project": p.id }, head);
+  if (open) {
+    if (inside.length) for (const c of inside) block.append(callRow(c, true));
+    else block.append(el("p", { class: "empty-list in-project" },
+      "Vuoto: trascina qui una call o usa “Sposta in progetto” dal suo menu."));
+  }
+  dropTarget(block, p.id);
+  return block;
 }
 
 function renderCalls() {
@@ -149,35 +357,32 @@ function renderCalls() {
   const q = $search.value.trim().toLowerCase();
   const shown = calls.filter(c => !q || c.title.toLowerCase().includes(q) ||
                                   c.name.toLowerCase().includes(q));
+  const known = new Set(projects.map(p => p.id));
   const items = [];
-  let group = null;
-  for (const c of shown) {
-    const date = new Date(c.started_at);
-    const g = groupOf(date);
-    if (g !== group) items.push(el("div", { class: "group" }, group = g));
-    const title = el("span", { class: "title" }, c.title);
-    const sub = el("span", { class: "sub" }, `${shortWhen(date)} · ${minutes(c.duration)}`,
-      c.error ? el("span", { class: "n" }, " · trascrizione illeggibile") :
-      c.to_review ? el("span", { class: "n" }, ` · ${c.to_review} da rivedere`) : null);
-    // The full title on hover: the row truncates it.
-    const a = el("a", { class: "call", href: `#/rec/${enc(c.name)}`, title: c.title }, title, sub);
-    a.addEventListener("dblclick", e => { e.preventDefault(); renameInPlace(title, c); });
-    const row = el("div", { class: "call-row" + (c.name === recName ? " active" : "") }, a);
-    row.append(iconButton("more", `Altre azioni per ${c.title}`, e => {
-      e.stopPropagation();
-      popMenu(row,
-        el("button", { role: "menuitem", onclick: () => renameInPlace(title, c) }, "Rinomina"),
-        el("button", { role: "menuitem", onclick: () => suggestTitle(title, c) },
-          "Titolo dal contenuto"),
-        el("button", { role: "menuitem", class: "danger", onclick: () => deleteCall(c) },
-          "Elimina"));
-    }, "call-more"));
-    items.push(row);
+  // Projects first, as folders (decision 0059); filtering opens the ones with a match.
+  const blocks = projects.map(p => [p, shown.filter(c => c.project === p.id)])
+    .filter(([, inside]) => !q || inside.length)
+    .map(([p, inside]) => projectBlock(p, inside, !!q));
+  if (projects.length || newProjectFor !== undefined || calls.length) {
+    items.push(el("div", { class: "group group-projects" }, "Progetti",
+      iconButton("plus", "Nuovo progetto", () => startNewProject(null), "project-add")));
   }
-  if (!items.length) {
-    items.push(el("p", { class: "empty-list" },
+  if (newProjectFor !== undefined) items.push(newProjectField());
+  items.push(...blocks);
+  // The calls without a project, by date as always; dropping a call here takes it out.
+  const loose = el("div", { class: "loose" });
+  let group = null;
+  for (const c of shown.filter(c => !known.has(c.project))) {
+    const g = groupOf(new Date(c.started_at));
+    if (g !== group) loose.append(el("div", { class: "group" }, group = g));
+    loose.append(callRow(c, false));
+  }
+  if (!loose.childElementCount && !blocks.length) {
+    loose.append(el("p", { class: "empty-list" },
       q ? `Nessuna call per “${$search.value.trim()}”.` : "Ancora nessuna call."));
   }
+  dropTarget(loose, null);
+  items.push(loose);
   $calls.replaceChildren(...items);
 }
 

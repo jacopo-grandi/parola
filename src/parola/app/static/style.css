@@ -110,6 +110,38 @@ a.pending-call[href]:hover, a.pending-call.active { box-shadow: inset 0 0 0 1px 
 .rec-start:disabled:hover { background: var(--raise); }
 .empty-list { padding: 8px 10px; font-size: var(--text-small); color: var(--fg-3); }
 
+/* Projects: folders of calls above the others (decision 0059). */
+.group-projects { display: flex; align-items: center; justify-content: space-between;
+                  margin-right: 0; }
+.group-projects .project-add { width: 22px; height: 22px; }
+.project { border-radius: 6px; }
+.project-head { position: relative; border-radius: 6px; }
+.project-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 34px 6px 4px;
+  border-radius: 6px; font-size: var(--text-small); color: var(--fg-2); text-align: left;
+}
+.project-toggle svg { flex: none; color: var(--fg-3); }
+.project-toggle svg:first-child { transition: transform 0.15s ease; }
+.project.open .project-toggle svg:first-child { transform: rotate(90deg); }
+.project-head:hover .project-toggle { background: var(--hover); color: var(--fg); }
+.project-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+                text-overflow: ellipsis; }
+.project-count { font-size: var(--text-caption); color: var(--fg-3);
+                 font-variant-numeric: tabular-nums; }
+.project-head .call-more { top: 4px; }
+.project-head:hover .call-more, .project-head:has(.menu) .call-more { opacity: 1; }
+.project-head .menu { top: 32px; right: 4px; }
+.project-toggle input.inline, .project-new input.inline { width: 100%;
+                                                         font-size: var(--text-small); }
+.project-new { padding: 4px 4px 6px; }
+.call-row.in-project .call { padding-left: 26px; }
+.empty-list.in-project { padding-left: 26px; font-size: var(--text-caption); }
+.loose { min-height: 48px; border-radius: 6px; }
+.project.drop, .loose.drop { background: rgba(10, 132, 255, 0.1);
+                             box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.5); }
+.menu .menu-note { display: block; padding: 6px 10px; font-size: var(--text-small);
+                   color: var(--fg-3); }
+
 /* ------------------------------------------------------------------ recorder */
 
 .recorder { padding: 0 12px; }

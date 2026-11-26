@@ -25,21 +25,24 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from parola import editing
+from parola.app.export import FORMATS, project_zip, safe_stem, to_markdown
+from parola.app.projects import ProjectError, Projects
 from parola.asr import release_models
 from parola.audio import channel_file
 from parola.audio.loudness import channel_loudness
 from parola.audio.playback import forget, playable
-from parola.capture.recorder import CHANNELS, LABELS, CaptureError, marked_text, to_dialogue
+from parola.capture.recorder import CHANNELS, CaptureError, to_dialogue
 from parola.capture.session import RecordingSession, SessionError
 from parola.models import ModelDownload
-from parola.schema import Transcript, format_timestamp
-from parola.speakers import label as speaker_label
+from parola.schema import Transcript
 from parola.speakers import name as speaker_name
 
 STATIC = Path(__file__).resolve().parent / "static"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Deleted calls are moved here, one folder per deletion, never removed by the app (decision 0017).
 TRASH = ".trash"
+# In a trash folder: the project the call was in, so a restore puts it back (decision 0059).
+PROJECT_MARK = ".project"
 _TRASHED = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)--\d{8}-\d{6}-\d{6}$")
 # Every file a recording owns. Listed, not globbed: "prova.*" would also catch "prova.2.json".
 OWNED = (
@@ -138,6 +141,14 @@ class SpeakerChange(BaseModel):
     speaker: str | None = None  # an existing voice id, "new" for a new voice, None for none
 
 
+class ProjectName(BaseModel):
+    name: str
+
+
+class ProjectChoice(BaseModel):
+    project: str | None  # None: no project
+
+
 class VoiceName(BaseModel):
     id: str
     name: str
@@ -174,16 +185,6 @@ def owned_files(folder: Path, name: str) -> list[Path]:
     return [folder / f"{name}{s}" for s in OWNED if (folder / f"{name}{s}").exists()]
 
 
-def to_markdown(t: Transcript, name: str) -> str:
-    lines = [f"# {name}", ""]
-    for s in t.segments:
-        label = speaker_label(t, s, LABELS)
-        who = f"**{label}** · " if label else ""
-        lines.append(f"{who}{format_timestamp(s.start)[:8]} — {marked_text(s)}")
-        lines.append("")
-    return "\n".join(lines)
-
-
 def create_app(folder: Path, session: RecordingSession | None = None,
                models: ModelDownload | None = None, listener=None,
                live_backend=None) -> FastAPI:  # fmt: skip
@@ -193,6 +194,7 @@ def create_app(folder: Path, session: RecordingSession | None = None,
     from parola.totti.listen import Listener
 
     session = session or RecordingSession(folder)
+    projects = Projects(folder)  # folders of calls (decision 0059)
     models = models or ModelDownload()
     # Live subtitles without a recording (decision 0042): the system audio kept in memory.
     listener = listener or Listener()
@@ -528,7 +530,9 @@ def create_app(folder: Path, session: RecordingSession | None = None,
 
     @app.get("/api/recordings")
     def list_recordings() -> list[dict]:
-        out = [summary_or_broken(folder, n) for n in recordings(folder)]
+        member = projects.membership()
+        out = [{**summary_or_broken(folder, n), "project": member.get(n)}
+               for n in recordings(folder)]  # fmt: skip
         return sorted(out, key=lambda r: r["started_at"], reverse=True)
 
     @app.get("/api/recordings/{name}")
@@ -615,6 +619,11 @@ def create_app(folder: Path, session: RecordingSession | None = None,
         for f in owned_files(folder, name):
             shutil.move(f, dest / f.name)
         forget(folder, name, CHANNELS)  # the copy for the player goes too
+        # Its project goes with it, so a new call that later gets the same name does not land
+        # in that folder, and a restore puts it back (decision 0059).
+        if pid := projects.membership().get(name):
+            (dest / PROJECT_MARK).write_text(pid)
+            projects.assign(name, None)
         return {"name": name, "trashed": entry}
 
     @app.post("/api/trash/{entry}/restore")
@@ -626,10 +635,89 @@ def create_app(folder: Path, session: RecordingSession | None = None,
         name = m.group(1)
         if (folder / f"{name}.json").exists():
             raise HTTPException(status_code=409, detail=f"a call named {name} exists")
+        mark = src / PROJECT_MARK
+        if mark.exists():
+            pid = mark.read_text().strip()
+            mark.unlink()
+            with contextlib.suppress(ProjectError):  # the project was deleted meanwhile
+                projects.assign(name, pid)
         for f in src.iterdir():
             shutil.move(f, folder / f.name)
         src.rmdir()
         return summary(folder, name)
+
+    # ------------------------------------------------ projects (decision 0059)
+
+    def _project_error(e: ProjectError) -> HTTPException:
+        missing = str(e).startswith("no project")
+        return HTTPException(status_code=404 if missing else 400, detail=str(e))
+
+    @app.get("/api/projects")
+    def list_projects() -> list[dict]:
+        return projects.list()
+
+    @app.post("/api/projects")
+    def create_project(req: ProjectName) -> dict:
+        try:
+            return projects.create(req.name)
+        except ProjectError as e:
+            raise _project_error(e) from e
+
+    @app.post("/api/projects/{pid}/rename")
+    def rename_project(pid: str, req: ProjectName) -> dict:
+        try:
+            return projects.rename(pid, req.name)
+        except ProjectError as e:
+            raise _project_error(e) from e
+
+    @app.delete("/api/projects/{pid}")
+    def delete_project(pid: str) -> list[dict]:
+        """The folder goes, its calls stay (without a project)."""
+        try:
+            projects.delete(pid)
+        except ProjectError as e:
+            raise _project_error(e) from e
+        return projects.list()
+
+    @app.post("/api/recordings/{name}/project")
+    def move_to_project(name: str, req: ProjectChoice) -> dict:
+        _load(name)  # only calls that exist, and only once they are transcribed
+        try:
+            projects.assign(name, req.project)
+        except ProjectError as e:
+            raise _project_error(e) from e
+        return {"name": name, "project": req.project}
+
+    @app.get("/export/project/{pid}.zip")
+    def export_project(pid: str, format: str = "docx"):
+        """Every call of the project, one file each, in a zip (decision 0059)."""
+        if format not in FORMATS:
+            raise HTTPException(status_code=404, detail="no such export")
+        try:
+            title, names = projects.name_of(pid), projects.calls_of(pid)
+        except ProjectError as e:
+            raise _project_error(e) from e
+        calls = []
+        for name in names:
+            path = folder / f"{name}.json"
+            if not path.exists():
+                continue
+            try:
+                t = Transcript.load(path)
+            except Exception as e:  # one unreadable call does not stop the others
+                print(f"warning: {name} left out of the project export ({e})", file=sys.stderr)
+                continue
+            s = summary(folder, name, t)
+            calls.append((s["started_at"], s["title"], t))
+        if not calls:
+            raise HTTPException(status_code=400, detail="the project has no calls")
+        stem = safe_stem(title, pid)
+        disposition = (f"attachment; filename=\"{pid}.zip\"; "
+                       f"filename*=UTF-8''{quote(stem)}.zip")  # fmt: skip
+        from fastapi.responses import Response
+
+        return Response(project_zip(calls, format), media_type="application/zip",
+                        headers={"Content-Disposition": disposition})  # fmt: skip
 
     @app.get("/api/recordings/{name}/title-suggestion")
     def title_suggestion(name: str) -> dict:
